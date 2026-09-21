@@ -80,3 +80,25 @@ body {
 html, body {
   overscroll-behavior-y: none;
 }
+
+/* A4 viewport and toolbar styles */
+.a4-viewport { display: flex; justify-content: center; padding: 24px 0; }
+.a4-viewport article { box-shadow: 0 10px 30px rgba(2,6,23,0.6); border-radius: 8px; }
+
+.floating-toolbar {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(148,163,184,0.08);
+  padding: 6px 8px;
+  gap: 6px;
+}
+.floating-toolbar button { padding: 6px; width: 32px; height: 32px; font-size: 14px; display:flex; align-items:center; justify-content:center; }
+.floating-toolbar select { padding: 4px 6px; font-size: 13px; height: 32px; }
+
+/* Keep the a4 container centered and prevent wrapping of toolbar */
+.floating-toolbar { white-space: nowrap; }
+
+/* Top menu dropdown */
+.top-nav-menu button { display: block; width: 100%; background: transparent; color: #e6eef8; border: none; text-align: left }
+.top-nav-menu button:focus { outline: none }
+.top-nav-menu button:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px }

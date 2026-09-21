@@ -6,15 +6,26 @@ const PAPER_SIZES = {
   A3: { w: 297, h: 420 },
 }
 
+const TOP_MENU_ITEMS = [
+  { id: 'editor', label: 'Editor' },
+  { id: 'templates', label: 'Templates' },
+  { id: 'library', label: 'Library' },
+  { id: 'config', label: 'Config' },
+]
+
 export default function App() {
   const [paperType, setPaperType] = useState(() => 'A4')
   const [orientation, setOrientation] = useState(() => 'portrait')
   const [autoFit, setAutoFit] = useState(false)
   const [activeTab, setActiveTab] = useState('editor')
+  const [showTopMenu, setShowTopMenu] = useState(false)
   const [zoom, setZoom] = useState(1)
   const [isSelecting, setIsSelecting] = useState(false)
   const editorRef = useRef(null)
   const viewportRef = useRef(null)
+  const topMenuRef = useRef(null)
+  const menuButtonRef = useRef(null)
+  const topMenuItemRefs = useRef([])
   const pinchRef = useRef({ pinching: false, initialDistance: 0, initialZoom: 1 })
   const fileInputRef = useRef(null)
   const imagePinchRef = useRef({ active: false, img: null, initialDistance: 0, initialWidth: 0 })
@@ -159,8 +170,61 @@ export default function App() {
     }
   }, [])
 
+  // Page scale for true A4 preview (794 x 1123 px at 96 DPI)
+  const [pageScale, setPageScale] = useState(1)
+  useEffect(() => {
+    const updateScale = () => {
+      const margin = 32 // 16px padding on left and right
+      const availableWidth = window.innerWidth - margin
+      const calculatedScale = Math.min(availableWidth / 794, 1)
+      setPageScale(calculatedScale)
+    }
+    updateScale()
+    window.addEventListener('resize', updateScale)
+    return () => window.removeEventListener('resize', updateScale)
+  }, [])
+
+  // Track focus on the editable canvas to hide/show UI chrome
+  useEffect(() => {
+    const el = editorRef.current
+    if (!el) return
+    const onFocus = () => setIsEditing(true)
+    const onBlur = () => setTimeout(() => setIsEditing(false), 120)
+    el.addEventListener('focus', onFocus)
+    el.addEventListener('blur', onBlur)
+    return () => {
+      el.removeEventListener('focus', onFocus)
+      el.removeEventListener('blur', onBlur)
+    }
+  }, [editorRef.current])
+
+  // Close top menu when clicking outside
+  useEffect(() => {
+    function onDocClick(e) {
+      if (showTopMenu && topMenuRef.current && !topMenuRef.current.contains(e.target)) setShowTopMenu(false)
+    }
+    document.addEventListener('mousedown', onDocClick)
+    return () => document.removeEventListener('mousedown', onDocClick)
+  }, [showTopMenu])
+
+  // Escape closes an open menu even when focus has moved away from its items.
+  useEffect(() => {
+    if (!showTopMenu) return
+
+    function onKeyDown(e) {
+      if (e.key !== 'Escape') return
+      e.preventDefault()
+      setShowTopMenu(false)
+      menuButtonRef.current?.focus()
+    }
+
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [showTopMenu])
+
   // Toolbar selection state
   const [toolbarActive, setToolbarActive] = useState(false)
+  const [isEditing, setIsEditing] = useState(false)
   const [isBold, setIsBold] = useState(false)
   const [isItalic, setIsItalic] = useState(false)
   const [isUnderline, setIsUnderline] = useState(false)
@@ -585,7 +649,8 @@ export default function App() {
 
   // Memoized toolbar element (kept outside of JSX to avoid nested-brace parsing issues)
   const toolbarMemo = useMemo(() => {
-    const containerClass = `fixed right-4 bottom-24 z-50 bg-slate-900/90 backdrop-blur-md rounded-xl border border-slate-700 shadow-xl text-slate-100 p-2 flex flex-col gap-1.5 max-w-[95vw] w-auto ${toolbarActive ? 'opacity-100 pointer-events-auto' : 'opacity-50 pointer-events-none'}`
+    const showToolbar = toolbarActive || isEditing || keyboardOffset > 0
+    const containerClass = `fixed right-4 bottom-4 z-50 bg-slate-900/60 backdrop-blur-md rounded-full border border-slate-700/40 shadow-xl text-slate-100 p-1 flex flex-row items-center gap-1 max-w-[95vw] w-auto ${showToolbar ? 'opacity-100 pointer-events-auto' : 'opacity-30 pointer-events-none'}`
     const baseBtn = 'px-1.5 py-0.5 rounded text-xs bg-slate-800 text-slate-100 focus:outline-none'
     const activeCls = 'bg-indigo-600 text-white'
     const tapStyle = { WebkitTapHighlightColor: 'transparent' }
@@ -711,16 +776,116 @@ export default function App() {
         </div>
       </div>
     )
-  }, [toolbarActive, isBold, isItalic, isUnderline, isOrderedList, isUnorderedList, fontSize, textAlign, isAlignLeft, isAlignCenter, isAlignRight, applyFormatCb, handleInsertCheckbox, handleInsertImage, keyboardOffset])
+  }, [toolbarActive, isBold, isItalic, isUnderline, isOrderedList, isUnorderedList, fontSize, textAlign, isAlignLeft, isAlignCenter, isAlignRight, applyFormatCb, handleInsertCheckbox, handleInsertImage, keyboardOffset, isEditing])
+
+  function focusTopMenuItem(index) {
+    const itemCount = TOP_MENU_ITEMS.length
+    const nextIndex = (index + itemCount) % itemCount
+    requestAnimationFrame(() => topMenuItemRefs.current[nextIndex]?.focus())
+  }
+
+  function openTopMenu(focusIndex) {
+    setShowTopMenu(true)
+    if (typeof focusIndex === 'number') focusTopMenuItem(focusIndex)
+  }
+
+  function selectTopMenuItem(tab) {
+    setActiveTab(tab)
+    setShowTopMenu(false)
+    requestAnimationFrame(() => menuButtonRef.current?.focus())
+  }
+
+  function handleMenuButtonKeyDown(e) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      openTopMenu(0)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      openTopMenu(TOP_MENU_ITEMS.length - 1)
+    } else if (e.key === 'Escape' && showTopMenu) {
+      e.preventDefault()
+      setShowTopMenu(false)
+    }
+  }
+
+  function handleTopMenuKeyDown(e) {
+    const currentIndex = topMenuItemRefs.current.indexOf(document.activeElement)
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      focusTopMenuItem(currentIndex < 0 ? 0 : currentIndex + 1)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      focusTopMenuItem(currentIndex < 0 ? TOP_MENU_ITEMS.length - 1 : currentIndex - 1)
+    } else if (e.key === 'Home') {
+      e.preventDefault()
+      focusTopMenuItem(0)
+    } else if (e.key === 'End') {
+      e.preventDefault()
+      focusTopMenuItem(TOP_MENU_ITEMS.length - 1)
+    } else if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      setShowTopMenu(false)
+      menuButtonRef.current?.focus()
+    }
+  }
 
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col pb-44">
+    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
       {/* Header */}
       <header className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-slate-800 rounded flex items-center justify-center text-slate-300 font-bold">ME</div>
+          <div className="flex items-center gap-3">
+            <div className="relative" ref={topMenuRef}>
+              <button
+              ref={menuButtonRef}
+              onClick={() => setShowTopMenu((s) => !s)}
+              onKeyDown={handleMenuButtonKeyDown}
+              aria-haspopup="menu"
+              aria-expanded={showTopMenu}
+              aria-controls="top-navigation-menu"
+              aria-label={`Navigation menu. Current tab: ${TOP_MENU_ITEMS.find((item) => item.id === activeTab)?.label || 'Editor'}`}
+              className={`relative h-8 min-w-10 px-1.5 bg-slate-800 rounded flex items-center justify-center gap-0.5 font-bold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-400 ${showTopMenu ? 'text-white bg-slate-700' : 'text-slate-300'}`}
+            >
+              ME
+              <svg
+                aria-hidden="true"
+                className={`h-3 w-3 transition-transform ${showTopMenu ? 'rotate-180' : ''}`}
+                viewBox="0 0 16 16"
+                fill="none"
+                xmlns="http://www.w3.org/2000/svg"
+              >
+                <path d="m4 6 4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+
+            {showTopMenu && (
+              <div
+                id="top-navigation-menu"
+                className="top-nav-menu absolute left-0 mt-2 w-44 rounded bg-slate-800 border border-slate-700 p-2 z-50"
+                role="menu"
+                aria-label="Main navigation"
+                onKeyDown={handleTopMenuKeyDown}
+              >
+                {TOP_MENU_ITEMS.map((item, index) => (
+                  <button
+                    key={item.id}
+                    ref={(element) => { topMenuItemRefs.current[index] = element }}
+                    type="button"
+                    role="menuitem"
+                    aria-current={activeTab === item.id ? 'page' : undefined}
+                    onClick={() => selectTopMenuItem(item.id)}
+                    className={`w-full text-left px-2 py-1 rounded ${activeTab === item.id ? 'bg-slate-700 text-white' : 'hover:bg-slate-700'}`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <h1 className="text-lg font-semibold">madeEASY.pdf</h1>
         </div>
+
         <div className="flex items-center gap-2">
           <button
             onClick={async () => {
@@ -744,7 +909,8 @@ export default function App() {
       </header>
 
       {/* Ultra-compact single-line top meta strip */}
-      <div className="px-3 py-2 border-b border-slate-800 flex items-center gap-2">
+      {!(isEditing || keyboardOffset > 0) && (
+        <div className="px-3 py-2 border-b border-slate-800 flex items-center gap-2">
         {/* hidden file input for image uploads triggered from toolbar */}
         <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageUpload} style={{ display: 'none' }} />
         <div>
@@ -779,7 +945,8 @@ export default function App() {
           <div className="text-xs text-slate-200 px-2">{Math.round(zoom * 100)}%</div>
           <button onClick={zoomIn} className="bg-slate-800 text-slate-100 rounded text-xs py-0.5 px-2">+</button>
         </div>
-      </div>
+        </div>
+      )}
 
       {/* Main content area */}
       <main className="flex-1 p-6 flex justify-center items-start overflow-auto">
@@ -806,8 +973,10 @@ export default function App() {
                 }
 
                 return (
-                  <article className="text-slate-900 shadow-lg rounded-md w-full max-w-[700px] aspect-[210/297] mx-auto" style={{ background: '#ffffff' }}>
-                    <div style={wrapperStyle} className="h-full box-border overflow-auto p-0">
+                  <div className="a4-viewport w-full flex justify-center">
+                    <div style={{ transform: `scale(${pageScale})`, transformOrigin: 'top center', width: 794 }}>
+                      <article className="text-slate-900 shadow-lg rounded-md mx-auto" style={{ background: '#ffffff', width: 794, height: 1123 }}>
+                        <div style={wrapperStyle} className="h-full box-border overflow-auto p-0">
                       <div
                         ref={editorRef}
                         contentEditable={true}
@@ -823,6 +992,8 @@ export default function App() {
                       </div>
                     </div>
                   </article>
+                    </div>
+                  </div>
                 )
               })()
             }
@@ -833,28 +1004,6 @@ export default function App() {
       {/* Floating Formatting Toolbar (elevated above bottom nav) */}
       {toolbarMemo}
 
-      {/* Bottom Navigation Tab Bar */}
-      <nav className="fixed bottom-0 left-0 right-0 bg-slate-800/95 border-t border-slate-700 h-16 flex items-center justify-around text-slate-200">
-        <button onClick={() => setActiveTab('editor')} className={`flex flex-col items-center justify-center gap-1 ${activeTab === 'editor' ? 'text-white' : ''}`}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M4 6H20V8H4V6Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M4 12H20V14H4V12Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><path d="M4 18H20V20H4V18Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/></svg>
-          <span className="text-xs">Editor</span>
-        </button>
-
-        <button onClick={() => setActiveTab('templates')} className={`flex flex-col items-center gap-1 ${activeTab === 'templates' ? 'text-white' : ''}`}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="7" height="7" stroke="currentColor" strokeWidth="1.5"/><rect x="14" y="3" width="7" height="7" stroke="currentColor" strokeWidth="1.5"/><rect x="3" y="14" width="7" height="7" stroke="currentColor" strokeWidth="1.5"/><rect x="14" y="14" width="7" height="7" stroke="currentColor" strokeWidth="1.5"/></svg>
-          <span className="text-xs">Templates</span>
-        </button>
-
-        <button onClick={() => setActiveTab('library')} className={`flex flex-col items-center gap-1 ${activeTab === 'library' ? 'text-white' : ''}`}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M4 6H20V20H4V6Z" stroke="currentColor" strokeWidth="1.5"/></svg>
-          <span className="text-xs">Library</span>
-        </button>
-
-        <button onClick={() => setActiveTab('config')} className={`flex flex-col items-center gap-1 ${activeTab === 'config' ? 'text-white' : ''}`}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 15.5C13.933 15.5 15.5 13.933 15.5 12C15.5 10.067 13.933 8.5 12 8.5C10.067 8.5 8.5 10.067 8.5 12C8.5 13.933 10.067 15.5 12 15.5Z" stroke="currentColor" strokeWidth="1.5"/><path d="M19.4 15A1.65 1.65 0 0 0 20 13.5C20 12.12 18.88 11 17.5 11C16.6 11 15.8 11.42 15.3 12.09" stroke="currentColor" strokeWidth="1.5"/></svg>
-          <span className="text-xs">Config</span>
-        </button>
-      </nav>
     </div>
   )
 }

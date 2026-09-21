@@ -139,6 +139,26 @@ export default function App() {
     }
   }, [zoom])
 
+  // Track soft keyboard size / visual viewport so toolbar can sit above it on mobile
+  const [keyboardOffset, setKeyboardOffset] = useState(0)
+  useEffect(() => {
+    const viewport = window.visualViewport
+    if (!viewport) return
+
+    const handleResize = () => {
+      const offset = window.innerHeight - viewport.height
+      setKeyboardOffset(offset > 100 ? offset : 0)
+    }
+
+    handleResize()
+    viewport.addEventListener('resize', handleResize)
+    viewport.addEventListener('scroll', handleResize)
+    return () => {
+      viewport.removeEventListener('resize', handleResize)
+      viewport.removeEventListener('scroll', handleResize)
+    }
+  }, [])
+
   // Toolbar selection state
   const [toolbarActive, setToolbarActive] = useState(false)
   const [isBold, setIsBold] = useState(false)
@@ -432,15 +452,15 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    const savedType = localStorage.getItem('typepdf:paperType')
-    const savedOrient = localStorage.getItem('typepdf:orientation')
+    const savedType = localStorage.getItem('madeEASY.pdf:paperType')
+    const savedOrient = localStorage.getItem('madeEASY.pdf:orientation')
     if (savedType) setPaperType(savedType)
     if (savedOrient) setOrientation(savedOrient)
   }, [])
 
   useEffect(() => {
-    localStorage.setItem('typepdf:paperType', paperType)
-    localStorage.setItem('typepdf:orientation', orientation)
+    localStorage.setItem('madeEASY.pdf:paperType', paperType)
+    localStorage.setItem('madeEASY.pdf:orientation', orientation)
   }, [paperType, orientation])
 
   const dims = useMemo(() => {
@@ -571,7 +591,12 @@ export default function App() {
     const tapStyle = { WebkitTapHighlightColor: 'transparent' }
 
     return (
-      <div className={containerClass + ' toolbar floating-toolbar'}>
+      <div
+        className={containerClass + ' toolbar floating-toolbar'}
+        style={{ bottom: `${keyboardOffset + 12}px` }}
+        onTouchStart={(e) => e.preventDefault()}
+        onMouseDown={(e) => e.preventDefault()}
+      >
         {/* Top row: Text & Style */}
         <div className="flex items-center gap-1">
           <button
@@ -612,6 +637,8 @@ export default function App() {
             onChange={(e) => { setFontSize(e.target.value); applyFontSizeToSelection(e.target.value) }}
             className="bg-slate-700 text-white text-xs border border-slate-600 rounded px-1 py-0.5 toolbar-select"
             style={{ marginLeft: 4 }}
+            onTouchStart={(e) => e.preventDefault()}
+            onMouseDown={(e) => e.preventDefault()}
           >
             {['12px','14px','16px','18px','20px','24px','32px'].map(s => <option key={s} value={s}>{s}</option>)}
           </select>
@@ -684,15 +711,15 @@ export default function App() {
         </div>
       </div>
     )
-  }, [toolbarActive, isBold, isItalic, isUnderline, isOrderedList, isUnorderedList, fontSize, textAlign, isAlignLeft, isAlignCenter, isAlignRight, applyFormatCb, handleInsertCheckbox, handleInsertImage])
+  }, [toolbarActive, isBold, isItalic, isUnderline, isOrderedList, isUnorderedList, fontSize, textAlign, isAlignLeft, isAlignCenter, isAlignRight, applyFormatCb, handleInsertCheckbox, handleInsertImage, keyboardOffset])
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col pb-44">
       {/* Header */}
       <header className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-8 h-8 bg-slate-800 rounded flex items-center justify-center text-slate-300 font-bold">TP</div>
-          <h1 className="text-lg font-semibold">TypePDF</h1>
+          <div className="w-8 h-8 bg-slate-800 rounded flex items-center justify-center text-slate-300 font-bold">ME</div>
+          <h1 className="text-lg font-semibold">madeEASY.pdf</h1>
         </div>
         <div className="flex items-center gap-2">
           <button
@@ -791,7 +818,7 @@ export default function App() {
                         onMouseUp={() => checkActiveFormats()}
                         onTouchEnd={() => checkActiveFormats()}
                       >
-                        <h1 className="text-2xl font-bold">TypePDF — Start typing</h1>
+                        <h1 className="text-2xl font-bold">madeEASY.pdf — Start typing</h1>
                         <p className="mt-4 text-slate-700">This is an editable document area. Use the formatting toolbar to style text.</p>
                       </div>
                     </div>

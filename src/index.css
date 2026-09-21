@@ -65,3 +65,18 @@ body {
   .floating-toolbar button { padding: 4px 6px !important; font-size: 12px !important; }
   .floating-toolbar { gap: 6px !important; }
 }
+
+/* Touch/caret improvements for contenteditable on mobile */
+[contenteditable="true"] {
+  -webkit-user-select: text !important;
+  user-select: text !important;
+  touch-action: manipulation;
+  outline: none;
+  min-height: 70vh;
+  padding-bottom: 250px; /* Extra bottom padding so users can tap and see below the keyboard */
+}
+
+/* Prevent elastic scrolling issues while editing */
+html, body {
+  overscroll-behavior-y: none;
+}

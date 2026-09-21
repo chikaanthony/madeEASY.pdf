@@ -6,6 +6,13 @@ const PAPER_SIZES = {
   A3: { w: 297, h: 420 },
 }
 
+const A4_PAGE_WIDTH = 794
+const A4_PAGE_HEIGHT = 1123
+const A4_VERTICAL_MARGIN = 72
+const A4_PRINTABLE_HEIGHT = A4_PAGE_HEIGHT - A4_VERTICAL_MARGIN * 2
+const A4_PAGE_GAP = 24
+const A4_PAGE_DEAD_ZONE = A4_VERTICAL_MARGIN * 2 + A4_PAGE_GAP
+
 const TOP_MENU_ITEMS = [
   { id: 'editor', label: 'Editor' },
   { id: 'templates', label: 'Templates' },
@@ -20,18 +27,151 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('editor')
   const [showTopMenu, setShowTopMenu] = useState(false)
   const [zoom, setZoom] = useState(1)
+  const [pageCount, setPageCount] = useState(1)
   const [isSelecting, setIsSelecting] = useState(false)
   const editorRef = useRef(null)
   const viewportRef = useRef(null)
   const topMenuRef = useRef(null)
   const menuButtonRef = useRef(null)
   const topMenuItemRefs = useRef([])
+  const savedRangeRef = useRef(null)
+  const pageLayoutFrameRef = useRef(null)
+  const pageLayoutSignatureRef = useRef(null)
   const pinchRef = useRef({ pinching: false, initialDistance: 0, initialZoom: 1 })
   const fileInputRef = useRef(null)
   const imagePinchRef = useRef({ active: false, img: null, initialDistance: 0, initialWidth: 0 })
   const imageDragRef = useRef({ dragging: false, img: null, startX: 0, startY: 0, originX: 0, originY: 0 })
 
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v))
+
+  function updatePageCount(element = editorRef.current, minimumPageCount = 1) {
+    if (!element) return
+    const contentHeight = Math.max(A4_PRINTABLE_HEIGHT, element.scrollHeight - A4_VERTICAL_MARGIN * 2)
+    const nextPageCount = Math.max(minimumPageCount, Math.ceil(contentHeight / A4_PRINTABLE_HEIGHT))
+    setPageCount((currentPageCount) => currentPageCount === nextPageCount ? currentPageCount : nextPageCount)
+  }
+
+  function getPageContentStart(pageIndex) {
+    return A4_VERTICAL_MARGIN + pageIndex * (A4_PRINTABLE_HEIGHT + A4_PAGE_DEAD_ZONE)
+  }
+
+  function getPageContentEnd(pageIndex) {
+    return getPageContentStart(pageIndex) + A4_PRINTABLE_HEIGHT
+  }
+
+  function getPageLayoutSignature(element) {
+    return Array.from(element.children)
+      .filter((child) => !child.hasAttribute('data-virtual-page-break'))
+      .map((child) => `${child.tagName}:${child.offsetHeight}:${child.textContent?.length || 0}`)
+      .join('|')
+  }
+
+  function insertVirtualPageBreak(block, nextPageIndex) {
+    const spacer = document.createElement('div')
+    spacer.setAttribute('data-virtual-page-break', 'true')
+    spacer.setAttribute('data-page-dead-zone', `${A4_PAGE_DEAD_ZONE}`)
+    spacer.setAttribute('contenteditable', 'false')
+    spacer.setAttribute('aria-hidden', 'true')
+    spacer.style.height = `${Math.max(0, getPageContentStart(nextPageIndex) - block.offsetTop)}px`
+    spacer.style.pointerEvents = 'none'
+    block.before(spacer)
+  }
+
+  function paginateDocument(element = editorRef.current) {
+    if (!element) return
+
+    Array.from(element.querySelectorAll(':scope > [data-virtual-page-break]')).forEach((spacer) => spacer.remove())
+
+    let pageIndex = 0
+    const blocks = Array.from(element.children)
+
+    blocks.forEach((block) => {
+      const blockHeight = block.offsetHeight
+      if (blockHeight === 0 || blockHeight > A4_PRINTABLE_HEIGHT) return
+
+      while (block.offsetTop >= getPageContentEnd(pageIndex)) {
+        const nextPageIndex = pageIndex + 1
+        if (block.offsetTop < getPageContentStart(nextPageIndex)) {
+          insertVirtualPageBreak(block, nextPageIndex)
+        }
+        pageIndex = nextPageIndex
+      }
+
+      if (block.offsetTop + blockHeight > getPageContentEnd(pageIndex)) {
+        const nextPageIndex = pageIndex + 1
+        insertVirtualPageBreak(block, nextPageIndex)
+        pageIndex = nextPageIndex
+      }
+    })
+
+    updatePageCount(element, pageIndex + 1)
+  }
+
+  function scheduleDocumentPagination(element = editorRef.current) {
+    if (!element) return
+    if (pageLayoutFrameRef.current) cancelAnimationFrame(pageLayoutFrameRef.current)
+
+    pageLayoutFrameRef.current = requestAnimationFrame(() => {
+      const signature = getPageLayoutSignature(element)
+      if (signature !== pageLayoutSignatureRef.current) {
+        paginateDocument(element)
+        pageLayoutSignatureRef.current = getPageLayoutSignature(element)
+      } else {
+        updatePageCount(element)
+      }
+      pageLayoutFrameRef.current = null
+    })
+  }
+
+  function handleContentInput(e) {
+    saveSelection()
+    checkActiveFormats()
+    scheduleDocumentPagination(e.currentTarget)
+  }
+
+  // Toolbar controls take focus on mobile. Keep the editor's range so a format
+  // action still applies to the text the user selected before touching the dock.
+  function saveSelection() {
+    try {
+      const selection = window.getSelection()
+      if (!selection || selection.rangeCount === 0) return
+
+      const range = selection.getRangeAt(0)
+      if (!editorRef.current?.contains(range.commonAncestorContainer)) return
+      savedRangeRef.current = range.cloneRange()
+    } catch (e) {
+      // A browser can discard the range while a touch interaction is ending.
+    }
+  }
+
+  function restoreSelection() {
+    try {
+      const range = savedRangeRef.current
+      if (!range || !editorRef.current?.contains(range.commonAncestorContainer)) return false
+
+      const selection = window.getSelection()
+      if (!selection) return false
+      selection.removeAllRanges()
+      selection.addRange(range)
+      return true
+    } catch (e) {
+      return false
+    }
+  }
+
+  function executeFormat(command, value = null) {
+    try {
+      saveSelection()
+      editorRef.current?.focus()
+      restoreSelection()
+      const didApply = document.execCommand(command, false, value)
+      saveSelection()
+      return didApply
+    } catch (e) {
+      console.warn('format failed', e)
+      return false
+    }
+  }
 
   function zoomIn() {
     setZoom((z) => clamp(Math.round((z + 0.1) * 100) / 100, 0.5, 2.0))
@@ -176,12 +316,35 @@ export default function App() {
     const updateScale = () => {
       const margin = 32 // 16px padding on left and right
       const availableWidth = window.innerWidth - margin
-      const calculatedScale = Math.min(availableWidth / 794, 1)
+      const calculatedScale = Math.min(availableWidth / A4_PAGE_WIDTH, 1)
       setPageScale(calculatedScale)
     }
     updateScale()
     window.addEventListener('resize', updateScale)
     return () => window.removeEventListener('resize', updateScale)
+  }, [])
+
+  // Text, pasted content, and images can all change the editable document's
+  // height. Observe it so the white page stack grows and shrinks accordingly.
+  useEffect(() => {
+    const editor = editorRef.current
+    if (!editor) return
+
+    const syncPageCount = () => scheduleDocumentPagination(editor)
+    syncPageCount()
+
+    if (!window.ResizeObserver) {
+      return () => {
+        if (pageLayoutFrameRef.current) cancelAnimationFrame(pageLayoutFrameRef.current)
+      }
+    }
+
+    const observer = new ResizeObserver(syncPageCount)
+    observer.observe(editor)
+    return () => {
+      observer.disconnect()
+      if (pageLayoutFrameRef.current) cancelAnimationFrame(pageLayoutFrameRef.current)
+    }
   }, [])
 
   // Track focus on the editable canvas to hide/show UI chrome
@@ -330,6 +493,9 @@ export default function App() {
 
   function applyFontSizeToSelection(size) {
     try {
+      saveSelection()
+      editorRef.current?.focus()
+      restoreSelection()
       const sel = window.getSelection()
       if (!sel || sel.rangeCount === 0) return
       const range = sel.getRangeAt(0)
@@ -341,9 +507,8 @@ export default function App() {
       // Wrap selection in a span with font-size
       const wrapped = `<span style="font-size:${size}">${html || '&nbsp;'}</span>`
       document.execCommand('insertHTML', false, wrapped)
-      // restore focus
       editorRef.current?.focus()
-      // re-run format checks
+      saveSelection()
       checkActiveFormats()
     } catch (e) {
       console.warn('applyFontSize failed', e)
@@ -354,10 +519,9 @@ export default function App() {
     try {
       const next = textAlign === 'left' ? 'center' : textAlign === 'center' ? 'right' : 'left'
       setTextAlign(next)
-      if (next === 'left') document.execCommand('justifyLeft')
-      if (next === 'center') document.execCommand('justifyCenter')
-      if (next === 'right') document.execCommand('justifyRight')
-      editorRef.current?.focus()
+      if (next === 'left') executeFormat('justifyLeft')
+      if (next === 'center') executeFormat('justifyCenter')
+      if (next === 'right') executeFormat('justifyRight')
     } catch (e) {}
   }
 
@@ -399,6 +563,7 @@ export default function App() {
     const handler = () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       rafRef.current = requestAnimationFrame(() => {
+        saveSelection()
         updateToolbarState()
         rafRef.current = null
       })
@@ -490,6 +655,7 @@ export default function App() {
             imageDragRef.current.dragging = false
             imageDragRef.current.img = null
             ev.target.releasePointerCapture && ev.target.releasePointerCapture(ev.pointerId)
+            scheduleDocumentPagination()
             setTimeout(() => updateToolbarState(), 10)
           }
         } catch (err) {}
@@ -537,22 +703,12 @@ export default function App() {
   const aspectRatio = String(dims.width) + '/' + String(dims.height)
 
   function applyFormat(command) {
-    try {
-      document.execCommand(command)
-      editorRef.current?.focus()
-    } catch (e) {
-      console.warn('format failed', e)
-    }
+    executeFormat(command)
   }
 
   // Memoize action handlers so their identity is stable during touch sequences
   const applyFormatCb = React.useCallback((command) => {
-    try {
-      document.execCommand(command)
-      editorRef.current?.focus()
-    } catch (e) {
-      console.warn('format failed', e)
-    }
+    executeFormat(command)
     // immediately update active format states and schedule a toolbar refresh
     try { checkActiveFormats() } catch (e) {}
     requestAnimationFrame(updateToolbarState)
@@ -561,6 +717,9 @@ export default function App() {
   const handleInsertCheckbox = React.useCallback((e) => {
     if (e && e.preventDefault) e.preventDefault()
     try {
+      saveSelection()
+      editorRef.current?.focus()
+      restoreSelection()
       const sel = window.getSelection()
       if (!sel) return
       const range = sel.getRangeAt(0)
@@ -596,6 +755,7 @@ export default function App() {
   const handleInsertImage = React.useCallback((e) => {
     if (e && e.preventDefault) e.preventDefault()
     try {
+      saveSelection()
       fileInputRef.current?.click()
     } catch (err) {
       console.warn('file input click failed', err)
@@ -611,6 +771,9 @@ export default function App() {
       reader.onload = function(ev) {
         const dataUrl = ev.target.result
         try {
+          saveSelection()
+          editorRef.current?.focus()
+          restoreSelection()
           // Try to insert at current selection using Range API
           const sel = window.getSelection()
           if (sel && sel.rangeCount > 0) {
@@ -639,6 +802,7 @@ export default function App() {
         }
         // reset input so same file can be selected again
         try { input.value = '' } catch (err) {}
+        scheduleDocumentPagination()
         requestAnimationFrame(updateToolbarState)
       }
       reader.readAsDataURL(file)
@@ -650,69 +814,67 @@ export default function App() {
   // Memoized toolbar element (kept outside of JSX to avoid nested-brace parsing issues)
   const toolbarMemo = useMemo(() => {
     const showToolbar = toolbarActive || isEditing || keyboardOffset > 0
-    const containerClass = `fixed right-4 bottom-4 z-50 bg-slate-900/60 backdrop-blur-md rounded-full border border-slate-700/40 shadow-xl text-slate-100 p-1 flex flex-row items-center gap-1 max-w-[95vw] w-auto ${showToolbar ? 'opacity-100 pointer-events-auto' : 'opacity-30 pointer-events-none'}`
-    const baseBtn = 'px-1.5 py-0.5 rounded text-xs bg-slate-800 text-slate-100 focus:outline-none'
+    const containerClass = `toolbar-dock toolbar ${showToolbar ? 'opacity-100 pointer-events-auto' : 'opacity-30 pointer-events-none'}`
+    const baseBtn = 'toolbar-btn px-1.5 py-0.5 rounded text-xs bg-slate-800 text-slate-100 focus:outline-none'
     const activeCls = 'bg-indigo-600 text-white'
     const tapStyle = { WebkitTapHighlightColor: 'transparent' }
 
     return (
       <div
-        className={containerClass + ' toolbar floating-toolbar'}
+        className={containerClass}
         style={{ bottom: `${keyboardOffset + 12}px` }}
-        onTouchStart={(e) => e.preventDefault()}
-        onMouseDown={(e) => e.preventDefault()}
       >
-        {/* Top row: Text & Style */}
-        <div className="flex items-center gap-1">
+        <div className="toolbar-scroll-row">
           <button
-            onPointerDown={(e) => { e.preventDefault(); applyFormatCb('bold'); checkActiveFormats() }}
-            onMouseDown={(e) => e.preventDefault()}
-            onTouchStart={(e) => { e.preventDefault(); applyFormatCb('bold'); checkActiveFormats() }}
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('bold'); checkActiveFormats() }}
             className={`${baseBtn} ${isBold && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
             aria-pressed={isBold}
             style={tapStyle}
           >
-            B
+            <b>B</b>
           </button>
 
           <button
-            onPointerDown={(e) => { e.preventDefault(); applyFormatCb('italic'); checkActiveFormats() }}
-            onMouseDown={(e) => e.preventDefault()}
-            onTouchStart={(e) => { e.preventDefault(); applyFormatCb('italic'); checkActiveFormats() }}
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('italic'); checkActiveFormats() }}
             className={`${baseBtn} ${isItalic && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
             aria-pressed={isItalic}
             style={tapStyle}
           >
-            I
+            <i>I</i>
           </button>
 
           <button
-            onPointerDown={(e) => { e.preventDefault(); applyFormatCb('underline'); checkActiveFormats() }}
-            onMouseDown={(e) => e.preventDefault()}
-            onTouchStart={(e) => { e.preventDefault(); applyFormatCb('underline'); checkActiveFormats() }}
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('underline'); checkActiveFormats() }}
             className={`${baseBtn} ${isUnderline && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
             aria-pressed={isUnderline}
             style={tapStyle}
           >
-            U
+            <u>U</u>
           </button>
 
           <select
             value={fontSize}
             onChange={(e) => { setFontSize(e.target.value); applyFontSizeToSelection(e.target.value) }}
-            className="bg-slate-700 text-white text-xs border border-slate-600 rounded px-1 py-0.5 toolbar-select"
+            className="toolbar-select bg-slate-700 text-white text-xs border border-slate-600 rounded px-1 py-0.5"
             style={{ marginLeft: 4 }}
-            onTouchStart={(e) => e.preventDefault()}
-            onMouseDown={(e) => e.preventDefault()}
+            onTouchStart={saveSelection}
+            onMouseDown={saveSelection}
+            onFocus={saveSelection}
           >
             {['12px','14px','16px','18px','20px','24px','32px'].map(s => <option key={s} value={s}>{s}</option>)}
           </select>
 
           {/* Alignment icons */}
           <button
-            onPointerDown={(e) => { e.preventDefault(); document.execCommand('justifyLeft'); checkActiveFormats(); editorRef.current?.focus() }}
-            onMouseDown={(e) => e.preventDefault()}
-            onTouchStart={(e) => e.preventDefault()}
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('justifyLeft'); checkActiveFormats() }}
             className={`${baseBtn} ${isAlignLeft && toolbarActive ? activeCls + ' shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
             aria-pressed={isAlignLeft}
             title="Align left"
@@ -722,9 +884,9 @@ export default function App() {
           </button>
 
           <button
-            onPointerDown={(e) => { e.preventDefault(); document.execCommand('justifyCenter'); checkActiveFormats(); editorRef.current?.focus() }}
-            onMouseDown={(e) => e.preventDefault()}
-            onTouchStart={(e) => e.preventDefault()}
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('justifyCenter'); checkActiveFormats() }}
             className={`${baseBtn} ${isAlignCenter && toolbarActive ? activeCls + ' shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
             aria-pressed={isAlignCenter}
             title="Align center"
@@ -734,9 +896,9 @@ export default function App() {
           </button>
 
           <button
-            onPointerDown={(e) => { e.preventDefault(); document.execCommand('justifyRight'); checkActiveFormats(); editorRef.current?.focus() }}
-            onMouseDown={(e) => e.preventDefault()}
-            onTouchStart={(e) => e.preventDefault()}
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('justifyRight'); checkActiveFormats() }}
             className={`${baseBtn} ${isAlignRight && toolbarActive ? activeCls + ' shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
             aria-pressed={isAlignRight}
             title="Align right"
@@ -744,14 +906,10 @@ export default function App() {
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="7" y="4" width="14" height="2" rx="1" fill="currentColor"/><rect x="3" y="8" width="18" height="2" rx="1" fill="currentColor"/><rect x="7" y="12" width="14" height="2" rx="1" fill="currentColor"/><rect x="3" y="16" width="18" height="2" rx="1" fill="currentColor"/></svg>
           </button>
-        </div>
-
-        {/* Bottom row: Lists & Tools */}
-        <div className="flex items-center gap-1">
           <button
-            onPointerDown={(e) => { e.preventDefault(); applyFormatCb('insertUnorderedList'); checkActiveFormats(); try { setIsUnorderedList(Boolean(document.queryCommandState && document.queryCommandState('insertUnorderedList'))) } catch (err) {} }}
-            onMouseDown={(e) => e.preventDefault()}
-            onTouchStart={(e) => e.preventDefault()}
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('insertUnorderedList'); checkActiveFormats(); try { setIsUnorderedList(Boolean(document.queryCommandState && document.queryCommandState('insertUnorderedList'))) } catch (err) {} }}
             className={`${baseBtn} ${isUnorderedList && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
             style={tapStyle}
           >
@@ -759,20 +917,20 @@ export default function App() {
           </button>
 
           <button
-            onPointerDown={(e) => { e.preventDefault(); applyFormatCb('insertOrderedList'); checkActiveFormats(); try { setIsOrderedList(Boolean(document.queryCommandState && document.queryCommandState('insertOrderedList'))) } catch (err) {} }}
-            onMouseDown={(e) => e.preventDefault()}
-            onTouchStart={(e) => e.preventDefault()}
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('insertOrderedList'); checkActiveFormats(); try { setIsOrderedList(Boolean(document.queryCommandState && document.queryCommandState('insertOrderedList'))) } catch (err) {} }}
             className={`${baseBtn} ${isOrderedList && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
             style={tapStyle}
           >
             1.
           </button>
 
-          <button onPointerDown={handleInsertImage} onMouseDown={(e) => e.preventDefault()} onTouchStart={(e) => e.preventDefault()} className={baseBtn} style={tapStyle}>📷</button>
+          <button type="button" onTouchStart={saveSelection} onMouseDown={(e) => { e.preventDefault(); handleInsertImage(e) }} className={baseBtn} style={tapStyle}>📷</button>
 
-          <button onPointerDown={handleInsertCheckbox} onMouseDown={(e) => e.preventDefault()} onTouchStart={(e) => e.preventDefault()} className={baseBtn} style={tapStyle}>☐</button>
+          <button type="button" onTouchStart={saveSelection} onMouseDown={(e) => { e.preventDefault(); handleInsertCheckbox(e) }} className={baseBtn} style={tapStyle}>☐</button>
 
-          <button onPointerDown={(e) => { e.preventDefault(); setAutoFit((v) => !v); requestAnimationFrame(updateToolbarState) }} onMouseDown={(e) => e.preventDefault()} onTouchStart={(e) => e.preventDefault()} className={baseBtn} style={tapStyle}>⇱</button>
+          <button type="button" onTouchStart={saveSelection} onMouseDown={(e) => { e.preventDefault(); setAutoFit((v) => !v); requestAnimationFrame(updateToolbarState) }} className={baseBtn} style={tapStyle}>⇱</button>
         </div>
       </div>
     )
@@ -949,55 +1107,72 @@ export default function App() {
       )}
 
       {/* Main content area */}
-      <main className="flex-1 p-6 flex justify-center items-start overflow-auto">
-        <div className="w-full max-w-[1000px] flex justify-center">
-          <div
-            ref={viewportRef}
-            onTouchStart={handleTouchStart}
-            onTouchMove={handleTouchMove}
-            onTouchEnd={handleTouchEnd}
-            className="overflow-auto w-full"
-            style={{ maxHeight: 'calc(100vh - 180px)', WebkitOverflowScrolling: 'touch', touchAction: 'pan-y pinch-zoom' }}
-          >
-            {/** Compute article style explicitly so Chrome device emulation reliably uses CSS zoom for selection */}
-            {
-              (() => {
-                // Overlay architecture: visual replica (non-interactive) + unscaled contenteditable overlay
-                // Use responsive CSS for the paper and keep the editable overlay unscaled
-                const wrapperStyle = { position: 'relative', boxSizing: 'border-box', minHeight: '400px' }
-                const visualStyle = { position: 'relative', pointerEvents: 'none', color: '#0f172a' }
-                const overlayStyle = {
-                  position: 'absolute', left: 0, top: 0, right: 0, bottom: 0,
-                  padding: '2rem', boxSizing: 'border-box', outline: 'none', background: 'transparent', color: 'inherit',
-                  whiteSpace: 'pre-wrap', userSelect: 'text', WebkitUserSelect: 'text', WebkitTouchCallout: 'default', touchAction: 'auto'
-                }
-
-                return (
-                  <div className="a4-viewport w-full flex justify-center">
-                    <div style={{ transform: `scale(${pageScale})`, transformOrigin: 'top center', width: 794 }}>
-                      <article className="text-slate-900 shadow-lg rounded-md mx-auto" style={{ background: '#ffffff', width: 794, height: 1123 }}>
-                        <div style={wrapperStyle} className="h-full box-border overflow-auto p-0">
-                      <div
-                        ref={editorRef}
-                        contentEditable={true}
-                        suppressContentEditableWarning
-                        className="min-h-full outline-none focus:outline-none select-text pointer-events-auto p-8"
-                        style={overlayStyle}
-                        onKeyUp={() => checkActiveFormats()}
-                        onMouseUp={() => checkActiveFormats()}
-                        onTouchEnd={() => checkActiveFormats()}
-                      >
-                        <h1 className="text-2xl font-bold">madeEASY.pdf — Start typing</h1>
-                        <p className="mt-4 text-slate-700">This is an editable document area. Use the formatting toolbar to style text.</p>
-                      </div>
-                    </div>
-                  </article>
-                    </div>
-                  </div>
-                )
-              })()
+      <main className="editor-workspace flex-1">
+        <div
+          ref={viewportRef}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
+          className="a4-document-viewport"
+          style={{ touchAction: 'pan-y pinch-zoom' }}
+        >
+          {(() => {
+            const documentHeight = pageCount * A4_PAGE_HEIGHT + Math.max(0, pageCount - 1) * A4_PAGE_GAP
+            const stageStyle = {
+              width: A4_PAGE_WIDTH * pageScale,
+              height: documentHeight * pageScale,
             }
-          </div>
+            const documentStyle = {
+              width: A4_PAGE_WIDTH,
+              height: documentHeight,
+              transform: `scale(${pageScale})`,
+              transformOrigin: 'top left',
+            }
+            const editorStyle = {
+              position: 'absolute',
+              top: 0,
+              left: 0,
+              width: A4_PAGE_WIDTH,
+              minHeight: A4_PAGE_HEIGHT,
+              padding: '72px 80px',
+              boxSizing: 'border-box',
+              outline: 'none',
+              background: 'transparent',
+              color: '#0f172a',
+              whiteSpace: 'pre-wrap',
+              userSelect: 'text',
+              WebkitUserSelect: 'text',
+              WebkitTouchCallout: 'default',
+              touchAction: 'auto',
+            }
+
+            return (
+              <div className="a4-document-stage" style={stageStyle}>
+                <article className="a4-document" style={documentStyle}>
+                  <div className="a4-page-stack" aria-hidden="true">
+                    {Array.from({ length: pageCount }, (_, index) => (
+                      <div className="a4-page-sheet" key={`page-${index + 1}`} />
+                    ))}
+                  </div>
+
+                  <div
+                    ref={editorRef}
+                    contentEditable={true}
+                    suppressContentEditableWarning
+                    className="document-editor select-text pointer-events-auto"
+                    style={editorStyle}
+                    onInput={handleContentInput}
+                    onKeyUp={() => { saveSelection(); checkActiveFormats() }}
+                    onMouseUp={() => { saveSelection(); checkActiveFormats() }}
+                    onTouchEnd={() => { saveSelection(); checkActiveFormats() }}
+                  >
+                    <h1 className="text-2xl font-bold">madeEASY.pdf — Start typing</h1>
+                    <p className="mt-4 text-slate-700">This is an editable document area. Use the formatting toolbar to style text.</p>
+                  </div>
+                </article>
+              </div>
+            )
+          })()}
         </div>
       </main>
 

@@ -59,21 +59,29 @@ body {
   -ms-touch-action: none;
 }
 
-/* compact toolbar for small screens to avoid overlap */
-@media (max-width: 480px) {
-  .toolbar-select { font-size: 12px !important; padding: 2px 6px !important; }
-  .floating-toolbar button { padding: 4px 6px !important; font-size: 12px !important; }
-  .floating-toolbar { gap: 6px !important; }
-}
-
 /* Touch/caret improvements for contenteditable on mobile */
 [contenteditable="true"] {
   -webkit-user-select: text !important;
   user-select: text !important;
   touch-action: manipulation;
   outline: none;
-  min-height: 70vh;
-  padding-bottom: 250px; /* Extra bottom padding so users can tap and see below the keyboard */
+  word-break: break-word;
+  overflow-wrap: break-word;
+  white-space: pre-wrap;
+  line-height: 1.6;
+  font-size: 14px;
+  color: #1a1a1a;
+}
+
+[contenteditable="true"] pre {
+  background: #f4f5f7;
+  border: 1px solid #e1e4e8;
+  border-radius: 6px;
+  padding: 12px 16px;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
 /* Prevent elastic scrolling issues while editing */
@@ -81,22 +89,159 @@ html, body {
   overscroll-behavior-y: none;
 }
 
-/* A4 viewport and toolbar styles */
-.a4-viewport { display: flex; justify-content: center; padding: 24px 0; }
-.a4-viewport article { box-shadow: 0 10px 30px rgba(2,6,23,0.6); border-radius: 8px; }
-
-.floating-toolbar {
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(148,163,184,0.08);
-  padding: 6px 8px;
-  gap: 6px;
+/* A4 workspace and stacked document sheets */
+.editor-workspace {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 20px 0 100px;
+  background-color: #12161f;
+  min-height: 100vh;
+  overflow-y: auto;
+  box-sizing: border-box;
 }
-.floating-toolbar button { padding: 6px; width: 32px; height: 32px; font-size: 14px; display:flex; align-items:center; justify-content:center; }
-.floating-toolbar select { padding: 4px 6px; font-size: 13px; height: 32px; }
 
-/* Keep the a4 container centered and prevent wrapping of toolbar */
-.floating-toolbar { white-space: nowrap; }
+.a4-document-viewport {
+  display: flex;
+  width: 100%;
+  justify-content: center;
+}
+
+.a4-document-stage {
+  flex: 0 0 auto;
+}
+
+.a4-document {
+  position: relative;
+}
+
+.a4-page-stack {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+}
+
+.a4-page-sheet {
+  width: 794px;
+  height: 1123px;
+  flex: 0 0 1123px;
+  background: #ffffff;
+  padding: 72px 80px;
+  box-sizing: border-box;
+  margin: 0 auto 24px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  border-radius: 2px;
+  position: relative;
+  overflow: hidden;
+}
+
+.a4-page-sheet:last-child {
+  margin-bottom: 0;
+}
+
+.a4-page-sheet [contenteditable="true"] {
+  box-sizing: border-box;
+  height: 100%;
+  outline: none;
+}
+
+/* Every sheet repeats the same top boundary for the printable area. */
+.a4-page-sheet + .a4-page-sheet {
+  padding-top: 72px !important;
+}
+
+.document-editor {
+  z-index: 1;
+}
+
+.document-editor > [data-virtual-page-break] {
+  display: block;
+  width: 100%;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Keep self-contained blocks intact when their content reaches a page edge. */
+.a4-page-sheet img,
+.a4-page-sheet pre,
+.a4-page-sheet code,
+.a4-page-sheet table,
+.a4-page-sheet p,
+.a4-page-sheet h1,
+.a4-page-sheet h2,
+.a4-page-sheet h3,
+.document-editor img,
+.document-editor pre,
+.document-editor code,
+.document-editor table,
+.document-editor p,
+.document-editor h1,
+.document-editor h2,
+.document-editor h3,
+.document-editor h4,
+.document-editor li,
+.document-editor blockquote,
+.document-editor figure,
+.a4-page-sheet h4,
+.a4-page-sheet li,
+.a4-page-sheet blockquote,
+.a4-page-sheet figure {
+  break-inside: avoid !important;
+  page-break-inside: avoid !important;
+}
+
+.toolbar-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  width: 100vw;
+  background: rgba(18, 22, 31, 0.96);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 -8px 24px rgba(2, 6, 23, 0.22);
+  z-index: 9999;
+  overflow: hidden;
+}
+
+.toolbar-scroll-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  overflow-x: auto;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x proximity;
+  scrollbar-width: none;
+}
+
+.toolbar-scroll-row::-webkit-scrollbar {
+  display: none;
+}
+
+.toolbar-btn,
+.toolbar-select,
+.toolbar-item {
+  flex-shrink: 0 !important;
+  scroll-snap-align: start;
+}
+
+.toolbar-btn {
+  display: inline-flex;
+  width: 32px;
+  height: 32px;
+  align-items: center;
+  justify-content: center;
+}
+
+.toolbar-select {
+  height: 32px;
+  min-width: 62px;
+}
 
 /* Top menu dropdown */
 .top-nav-menu button { display: block; width: 100%; background: transparent; color: #e6eef8; border: none; text-align: left }

@@ -29,6 +29,15 @@ export default function App() {
   const [zoom, setZoom] = useState(1)
   const [pageCount, setPageCount] = useState(1)
   const [isSelecting, setIsSelecting] = useState(false)
+  const [isExporting, setIsExporting] = useState(false)
+
+  // Track soft keyboard size and visual viewport so toolbar docks directly to keyboard
+  const [viewportStyle, setViewportStyle] = useState(() => ({
+    height: typeof window !== 'undefined' ? `${window.innerHeight}px` : '100%',
+    top: '0px',
+  }))
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false)
+
   const editorRef = useRef(null)
   const viewportRef = useRef(null)
   const topMenuRef = useRef(null)
@@ -44,19 +53,53 @@ export default function App() {
 
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v))
 
-  function updatePageCount(element = editorRef.current, minimumPageCount = 1) {
-    if (!element) return
-    const contentHeight = Math.max(A4_PRINTABLE_HEIGHT, element.scrollHeight - A4_VERTICAL_MARGIN * 2)
-    const nextPageCount = Math.max(minimumPageCount, Math.ceil(contentHeight / A4_PRINTABLE_HEIGHT))
-    setPageCount((currentPageCount) => currentPageCount === nextPageCount ? currentPageCount : nextPageCount)
-  }
-
   function getPageContentStart(pageIndex) {
     return A4_VERTICAL_MARGIN + pageIndex * (A4_PRINTABLE_HEIGHT + A4_PAGE_DEAD_ZONE)
   }
 
   function getPageContentEnd(pageIndex) {
     return getPageContentStart(pageIndex) + A4_PRINTABLE_HEIGHT
+  }
+
+  // Strict page count determination:
+  // Documents that fit on one page should stay strictly on 1 page!
+  // A second page is only created when content actually overflows past the bottom margin of Page 1.
+  function updatePageCount(element = editorRef.current, minimumPageCount = 1) {
+    if (!element) return
+
+    const contentBlocks = Array.from(element.children).filter(
+      (child) => !child.hasAttribute('data-virtual-page-break')
+    )
+
+    if (contentBlocks.length === 0) {
+      setPageCount(1)
+      return
+    }
+
+    let maxContentBottom = 0
+    for (const block of contentBlocks) {
+      const bottom = block.offsetTop + block.offsetHeight
+      if (bottom > maxContentBottom) {
+        maxContentBottom = bottom
+      }
+    }
+
+    // Page 1 printable area ends at getPageContentEnd(0) (1051px).
+    // Allow a small 4px subpixel/line-height buffer so minor rendering differences do not cause false overflows.
+    const page1End = getPageContentEnd(0)
+    if (maxContentBottom <= page1End + 4 && minimumPageCount <= 1) {
+      setPageCount((curr) => (curr === 1 ? curr : 1))
+      return
+    }
+
+    // If content extends beyond Page 1, calculate the required number of pages
+    let requiredPages = 1
+    while (maxContentBottom > getPageContentEnd(requiredPages - 1) + 4) {
+      requiredPages++
+    }
+
+    const nextPageCount = Math.max(minimumPageCount, requiredPages)
+    setPageCount((currentPageCount) => (currentPageCount === nextPageCount ? currentPageCount : nextPageCount))
   }
 
   function getPageLayoutSignature(element) {
@@ -97,7 +140,7 @@ export default function App() {
         pageIndex = nextPageIndex
       }
 
-      if (block.offsetTop + blockHeight > getPageContentEnd(pageIndex)) {
+      if (block.offsetTop + blockHeight > getPageContentEnd(pageIndex) + 4) {
         const nextPageIndex = pageIndex + 1
         insertVirtualPageBreak(block, nextPageIndex)
         pageIndex = nextPageIndex
@@ -190,7 +233,6 @@ export default function App() {
   function isInEditorOrToolbar(target) {
     try {
       if (!target) return false
-      // if target is a text node, use its parent element
       const el = target.nodeType === 3 ? target.parentElement : target
       if (!el || !el.closest) return false
       return Boolean(el.closest('[contenteditable="true"]') || el.closest('.toolbar'))
@@ -200,12 +242,10 @@ export default function App() {
   }
 
   function handleTouchStart(e) {
-    // If the touch started on an image inside the editor, handle image pinch/drag separately
     try {
       const t = e.target.nodeType === 3 ? e.target.parentElement : e.target
       const img = t && t.closest ? t.closest('img') : null
       if (img && e.touches && e.touches.length === 2 && editorRef.current && editorRef.current.contains(img)) {
-        // start image pinch
         imagePinchRef.current.active = true
         imagePinchRef.current.img = img
         imagePinchRef.current.initialDistance = getDistance(e.touches)
@@ -214,29 +254,23 @@ export default function App() {
         e.preventDefault()
         return
       }
-    } catch (err) {
-      // ignore
-    }
+    } catch (err) {}
 
-    // if touching inside editor or toolbar, don't treat as pinch/pan starter here
     if (isInEditorOrToolbar(e.target)) return
 
     if (e.touches && e.touches.length === 2) {
       pinchRef.current.pinching = true
       pinchRef.current.initialDistance = getDistance(e.touches)
       pinchRef.current.initialZoom = zoom
-      // when pinching, ensure we are not in selection mode
       setIsSelecting(false)
       return
     }
-    // single-finger touch may start selection
     if (e.touches && e.touches.length === 1) {
       setIsSelecting(true)
     }
   }
 
   function handleTouchMove(e) {
-    // image pinch-to-resize
     try {
       if (imagePinchRef.current.active && e.touches && e.touches.length === 2) {
         const distance = getDistance(e.touches)
@@ -252,7 +286,6 @@ export default function App() {
     } catch (err) {}
 
     if (pinchRef.current.pinching && e.touches && e.touches.length === 2) {
-      // only prevent default if the event is NOT inside the editable area or toolbar
       if (!isInEditorOrToolbar(e.target)) {
         e.preventDefault()
       }
@@ -264,7 +297,6 @@ export default function App() {
   }
 
   function handleTouchEnd(e) {
-    // end image pinch
     try {
       if (imagePinchRef.current.active && (!e.touches || e.touches.length < 2)) {
         imagePinchRef.current.active = false
@@ -275,46 +307,53 @@ export default function App() {
     if (!e.touches || e.touches.length < 2) {
       pinchRef.current.pinching = false
     }
-    // end selection on touchend
     if (!e.touches || e.touches.length === 0) {
       setTimeout(() => setIsSelecting(false), 50)
     }
   }
 
-  // If browser doesn't support CSS zoom, adjust editor font-size to approximate zoom
+  // Visual viewport tracking: locks outer viewport and docks toolbar directly to keyboard top edge
   useEffect(() => {
-    try {
-      if (editorRef.current) editorRef.current.style.fontSize = `${100 * zoom}%`
-    } catch (e) {
-      // ignore
+    const handleViewportUpdate = () => {
+      if (window.visualViewport) {
+        const vv = window.visualViewport
+        const isKeyboard = window.innerHeight - vv.height > 100
+        setIsKeyboardOpen(isKeyboard)
+        setViewportStyle({
+          height: `${vv.height}px`,
+          top: `${vv.offsetTop}px`,
+        })
+      } else {
+        setViewportStyle({
+          height: `${window.innerHeight}px`,
+          top: '0px',
+        })
+      }
     }
-  }, [zoom])
 
-  // Track soft keyboard size / visual viewport so toolbar can sit above it on mobile
-  const [keyboardOffset, setKeyboardOffset] = useState(0)
-  useEffect(() => {
-    const viewport = window.visualViewport
-    if (!viewport) return
-
-    const handleResize = () => {
-      const offset = window.innerHeight - viewport.height
-      setKeyboardOffset(offset > 100 ? offset : 0)
+    handleViewportUpdate()
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', handleViewportUpdate)
+      window.visualViewport.addEventListener('scroll', handleViewportUpdate)
     }
+    window.addEventListener('resize', handleViewportUpdate)
+    window.addEventListener('orientationchange', handleViewportUpdate)
 
-    handleResize()
-    viewport.addEventListener('resize', handleResize)
-    viewport.addEventListener('scroll', handleResize)
     return () => {
-      viewport.removeEventListener('resize', handleResize)
-      viewport.removeEventListener('scroll', handleResize)
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', handleViewportUpdate)
+        window.visualViewport.removeEventListener('scroll', handleViewportUpdate)
+      }
+      window.removeEventListener('resize', handleViewportUpdate)
+      window.removeEventListener('orientationchange', handleViewportUpdate)
     }
   }, [])
 
-  // Page scale for true A4 preview (794 x 1123 px at 96 DPI)
+  // Page scale for responsive editor stage
   const [pageScale, setPageScale] = useState(1)
   useEffect(() => {
     const updateScale = () => {
-      const margin = 32 // 16px padding on left and right
+      const margin = 32
       const availableWidth = window.innerWidth - margin
       const calculatedScale = Math.min(availableWidth / A4_PAGE_WIDTH, 1)
       setPageScale(calculatedScale)
@@ -324,8 +363,7 @@ export default function App() {
     return () => window.removeEventListener('resize', updateScale)
   }, [])
 
-  // Text, pasted content, and images can all change the editable document's
-  // height. Observe it so the white page stack grows and shrinks accordingly.
+  // Sync page count with content height changes
   useEffect(() => {
     const editor = editorRef.current
     if (!editor) return
@@ -347,7 +385,7 @@ export default function App() {
     }
   }, [])
 
-  // Track focus on the editable canvas to hide/show UI chrome
+  // Focus tracking
   useEffect(() => {
     const el = editorRef.current
     if (!el) return
@@ -370,17 +408,14 @@ export default function App() {
     return () => document.removeEventListener('mousedown', onDocClick)
   }, [showTopMenu])
 
-  // Escape closes an open menu even when focus has moved away from its items.
   useEffect(() => {
     if (!showTopMenu) return
-
     function onKeyDown(e) {
       if (e.key !== 'Escape') return
       e.preventDefault()
       setShowTopMenu(false)
       menuButtonRef.current?.focus()
     }
-
     document.addEventListener('keydown', onKeyDown)
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [showTopMenu])
@@ -400,7 +435,7 @@ export default function App() {
   const [isAlignRight, setIsAlignRight] = useState(false)
   const rafRef = useRef(null)
 
-  // Runtime error overlay (helpful when DevTools isn't open) — displays errors on the page
+  // Runtime error overlay
   useEffect(() => {
     const showError = (msg) => {
       try {
@@ -421,14 +456,12 @@ export default function App() {
             fontSize: '13px',
             maxHeight: '40vh',
             overflow: 'auto',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.6)'
+            boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
           })
           document.body.appendChild(el)
         }
         el.textContent = msg
-      } catch (err) {
-        // ignore
-      }
+      } catch (err) {}
     }
 
     const onErr = (e) => {
@@ -469,7 +502,6 @@ export default function App() {
         setIsAlignCenter(Boolean(document.queryCommandState && document.queryCommandState('justifyCenter')))
         setIsAlignRight(Boolean(document.queryCommandState && document.queryCommandState('justifyRight')))
       } catch (e) {}
-      // detect computed font-size at caret
       try {
         const sel = window.getSelection && window.getSelection()
         if (sel && sel.anchorNode) {
@@ -478,9 +510,7 @@ export default function App() {
           const size = el ? window.getComputedStyle(el).fontSize : null
           if (size) setFontSize(size)
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
     } catch (e) {
       setIsBold(false)
       setIsItalic(false)
@@ -500,11 +530,9 @@ export default function App() {
       if (!sel || sel.rangeCount === 0) return
       const range = sel.getRangeAt(0)
       const selectedHtml = range.cloneContents()
-      // Serialize selected contents
       const div = document.createElement('div')
       div.appendChild(selectedHtml)
       const html = div.innerHTML
-      // Wrap selection in a span with font-size
       const wrapped = `<span style="font-size:${size}">${html || '&nbsp;'}</span>`
       document.execCommand('insertHTML', false, wrapped)
       editorRef.current?.focus()
@@ -513,16 +541,6 @@ export default function App() {
     } catch (e) {
       console.warn('applyFontSize failed', e)
     }
-  }
-
-  function cycleTextAlign() {
-    try {
-      const next = textAlign === 'left' ? 'center' : textAlign === 'center' ? 'right' : 'left'
-      setTextAlign(next)
-      if (next === 'left') executeFormat('justifyLeft')
-      if (next === 'center') executeFormat('justifyCenter')
-      if (next === 'right') executeFormat('justifyRight')
-    } catch (e) {}
   }
 
   function updateToolbarState() {
@@ -538,18 +556,10 @@ export default function App() {
 
     const anchor = sel.anchorNode
     const inEditor = editorRef.current && anchor && editorRef.current.contains(anchor)
-    const collapsed = sel.isCollapsed
     const hasText = sel.toString().length > 0
     const active = Boolean(inEditor && (hasText || document.activeElement === editorRef.current))
 
     setToolbarActive(active)
-
-    // keep visual and overlay font-size in sync for zoom
-    try {
-      if (editorRef.current) editorRef.current.style.fontSize = `${100 * zoom}%`
-    } catch (e) {}
-
-    // queryCommandState works for caret or selection to detect applied styles
     checkActiveFormats()
     try {
       setIsOrderedList(Boolean(document.queryCommandState && document.queryCommandState('insertOrderedList')))
@@ -559,7 +569,6 @@ export default function App() {
   }
 
   useEffect(() => {
-    // Throttle selection updates using requestAnimationFrame to avoid rapid React renders
     const handler = () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
       rafRef.current = requestAnimationFrame(() => {
@@ -570,19 +579,19 @@ export default function App() {
     }
 
     document.addEventListener('selectionchange', handler)
-    // also listen for focus/mouse/key events inside editor
     const el = editorRef.current
     let onKeyDown = null
     let onPointerDownImg = null
     let onPointerMoveImg = null
     let onPointerUpImg = null
+
     if (el) {
       el.addEventListener('keyup', handler)
       el.addEventListener('mouseup', handler)
       el.addEventListener('touchend', handler)
       el.addEventListener('focus', handler)
       el.addEventListener('blur', handler)
-      // keydown for checklist Enter behavior
+
       onKeyDown = (ev) => {
         if (ev.key === 'Enter') {
           try {
@@ -593,7 +602,6 @@ export default function App() {
             if (!block) return
             const first = block.firstElementChild
             if (first && first.tagName === 'INPUT' && first.type === 'checkbox') {
-              // inside a checklist line: create next checklist line
               ev.preventDefault()
               const newBlock = document.createElement('div')
               const cb = document.createElement('input')
@@ -604,7 +612,6 @@ export default function App() {
               newBlock.appendChild(text)
               if (block.parentNode) {
                 block.parentNode.insertBefore(newBlock, block.nextSibling)
-                // place caret in newBlock
                 const r = document.createRange()
                 r.setStart(text, 0)
                 r.collapse(true)
@@ -612,13 +619,11 @@ export default function App() {
                 sel.addRange(r)
               }
             }
-          } catch (err) {
-            // ignore
-          }
+          } catch (err) {}
         }
       }
       el.addEventListener('keydown', onKeyDown)
-      // pointer events for dragging images
+
       onPointerDownImg = (ev) => {
         try {
           const t = ev.target.nodeType === 3 ? ev.target.parentElement : ev.target
@@ -664,6 +669,7 @@ export default function App() {
       el.addEventListener('pointermove', onPointerMoveImg)
       el.addEventListener('pointerup', onPointerUpImg)
     }
+
     return () => {
       document.removeEventListener('selectionchange', handler)
       if (rafRef.current) cancelAnimationFrame(rafRef.current)
@@ -699,20 +705,11 @@ export default function App() {
     return { width: base.h, height: base.w }
   }, [paperType, orientation])
 
-  // aspect ratio string computed safely (avoid template literal pitfalls inside JSX)
-  const aspectRatio = String(dims.width) + '/' + String(dims.height)
-
-  function applyFormat(command) {
-    executeFormat(command)
-  }
-
-  // Memoize action handlers so their identity is stable during touch sequences
   const applyFormatCb = React.useCallback((command) => {
     executeFormat(command)
-    // immediately update active format states and schedule a toolbar refresh
     try { checkActiveFormats() } catch (e) {}
     requestAnimationFrame(updateToolbarState)
-  }, [/* stable */])
+  }, [])
 
   const handleInsertCheckbox = React.useCallback((e) => {
     if (e && e.preventDefault) e.preventDefault()
@@ -723,21 +720,18 @@ export default function App() {
       const sel = window.getSelection()
       if (!sel) return
       const range = sel.getRangeAt(0)
-      // find block ancestor (p, div, li) inside editor
       let node = range.startContainer
       while (node && node !== editorRef.current && node.nodeType !== 1) node = node.parentNode
       let block = node && node.nodeType === 1 ? node.closest('p,div,li') : null
       if (!block || !editorRef.current.contains(block)) {
-        // fallback: insert new paragraph at end
         block = document.createElement('div')
         block.innerHTML = '<br>'
         editorRef.current.appendChild(block)
       }
 
-      // insert checkbox input at start of block if not already
       const first = block.firstElementChild
       if (first && first.tagName === 'INPUT' && first.type === 'checkbox') {
-        // already a checkbox, do nothing
+        // already checkbox
       } else {
         const cb = document.createElement('input')
         cb.type = 'checkbox'
@@ -774,7 +768,6 @@ export default function App() {
           saveSelection()
           editorRef.current?.focus()
           restoreSelection()
-          // Try to insert at current selection using Range API
           const sel = window.getSelection()
           if (sel && sel.rangeCount > 0) {
             const range = sel.getRangeAt(0)
@@ -787,20 +780,17 @@ export default function App() {
             img.style.margin = '0.5rem auto'
             img.style.borderRadius = '0.375rem'
             range.insertNode(img)
-            // place caret after the inserted image
             const r = document.createRange()
             r.setStartAfter(img)
             r.collapse(true)
             sel.removeAllRanges()
             sel.addRange(r)
           } else {
-            // fallback to execCommand
             try { document.execCommand('insertImage', false, dataUrl) } catch (err) {}
           }
         } catch (err) {
           console.warn('insert image failed', err)
         }
-        // reset input so same file can be selected again
         try { input.value = '' } catch (err) {}
         scheduleDocumentPagination()
         requestAnimationFrame(updateToolbarState)
@@ -811,130 +801,176 @@ export default function App() {
     }
   }, [])
 
-  // Memoized toolbar element (kept outside of JSX to avoid nested-brace parsing issues)
-  const toolbarMemo = useMemo(() => {
-    const showToolbar = toolbarActive || isEditing || keyboardOffset > 0
-    const containerClass = `toolbar-dock toolbar ${showToolbar ? 'opacity-100 pointer-events-auto' : 'opacity-30 pointer-events-none'}`
-    const baseBtn = 'toolbar-btn px-1.5 py-0.5 rounded text-xs bg-slate-800 text-slate-100 focus:outline-none'
-    const activeCls = 'bg-indigo-600 text-white'
-    const tapStyle = { WebkitTapHighlightColor: 'transparent' }
+  // Robust 1:1 PDF Generation with Direct Automatic Download (Requirements 1, 3, 4)
+  async function handleExportPdf() {
+    if (isExporting) return
+    setIsExporting(true)
 
-    return (
-      <div
-        className={containerClass}
-        style={{ bottom: `${keyboardOffset + 12}px` }}
-      >
-        <div className="toolbar-scroll-row">
-          <button
-            type="button"
-            onTouchStart={saveSelection}
-            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('bold'); checkActiveFormats() }}
-            className={`${baseBtn} ${isBold && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
-            aria-pressed={isBold}
-            style={tapStyle}
-          >
-            <b>B</b>
-          </button>
+    try {
+      const editorEl = editorRef.current
+      if (!editorEl) return
 
-          <button
-            type="button"
-            onTouchStart={saveSelection}
-            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('italic'); checkActiveFormats() }}
-            className={`${baseBtn} ${isItalic && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
-            aria-pressed={isItalic}
-            style={tapStyle}
-          >
-            <i>I</i>
-          </button>
+      const { jsPDF } = await import('jspdf')
+      const html2canvasMod = await import('html2canvas')
+      const html2canvas = html2canvasMod.default || html2canvasMod
 
-          <button
-            type="button"
-            onTouchStart={saveSelection}
-            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('underline'); checkActiveFormats() }}
-            className={`${baseBtn} ${isUnderline && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
-            aria-pressed={isUnderline}
-            style={tapStyle}
-          >
-            <u>U</u>
-          </button>
+      const baseDim = PAPER_SIZES[paperType] || PAPER_SIZES.A4
+      const isLandscape = orientation === 'landscape'
+      const paperWidthMm = isLandscape ? baseDim.h : baseDim.w
+      const paperHeightMm = isLandscape ? baseDim.w : baseDim.h
 
-          <select
-            value={fontSize}
-            onChange={(e) => { setFontSize(e.target.value); applyFontSizeToSelection(e.target.value) }}
-            className="toolbar-select bg-slate-700 text-white text-xs border border-slate-600 rounded px-1 py-0.5"
-            style={{ marginLeft: 4 }}
-            onTouchStart={saveSelection}
-            onMouseDown={saveSelection}
-            onFocus={saveSelection}
-          >
-            {['12px','14px','16px','18px','20px','24px','32px'].map(s => <option key={s} value={s}>{s}</option>)}
-          </select>
+      // Target 96 DPI pixel dimensions matching editor canvas
+      const pageWidthPx = Math.round((paperWidthMm * 96) / 25.4)
+      const pageHeightPx = Math.round((paperHeightMm * 96) / 25.4)
+      const pageGapPx = A4_PAGE_GAP
 
-          {/* Alignment icons */}
-          <button
-            type="button"
-            onTouchStart={saveSelection}
-            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('justifyLeft'); checkActiveFormats() }}
-            className={`${baseBtn} ${isAlignLeft && toolbarActive ? activeCls + ' shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
-            aria-pressed={isAlignLeft}
-            title="Align left"
-            style={tapStyle}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="3" y="4" width="14" height="2" rx="1" fill="currentColor"/><rect x="3" y="8" width="18" height="2" rx="1" fill="currentColor"/><rect x="3" y="12" width="14" height="2" rx="1" fill="currentColor"/><rect x="3" y="16" width="18" height="2" rx="1" fill="currentColor"/></svg>
-          </button>
+      // Refresh pagination to verify exact page count
+      paginateDocument(editorEl)
+      const currentPages = pageCount
 
-          <button
-            type="button"
-            onTouchStart={saveSelection}
-            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('justifyCenter'); checkActiveFormats() }}
-            className={`${baseBtn} ${isAlignCenter && toolbarActive ? activeCls + ' shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
-            aria-pressed={isAlignCenter}
-            title="Align center"
-            style={tapStyle}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="5" y="4" width="14" height="2" rx="1" fill="currentColor"/><rect x="3" y="8" width="18" height="2" rx="1" fill="currentColor"/><rect x="5" y="12" width="14" height="2" rx="1" fill="currentColor"/><rect x="3" y="16" width="18" height="2" rx="1" fill="currentColor"/></svg>
-          </button>
+      // Create unscaled 1:1 staging clone off-screen
+      const stagingContainer = document.createElement('div')
+      stagingContainer.className = 'pdf-export-hidden'
+      stagingContainer.style.position = 'fixed'
+      stagingContainer.style.left = '-9999px'
+      stagingContainer.style.top = '0'
+      stagingContainer.style.width = `${pageWidthPx}px`
+      stagingContainer.style.zIndex = '-9999'
+      stagingContainer.style.background = '#ffffff'
 
-          <button
-            type="button"
-            onTouchStart={saveSelection}
-            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('justifyRight'); checkActiveFormats() }}
-            className={`${baseBtn} ${isAlignRight && toolbarActive ? activeCls + ' shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
-            aria-pressed={isAlignRight}
-            title="Align right"
-            style={tapStyle}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="7" y="4" width="14" height="2" rx="1" fill="currentColor"/><rect x="3" y="8" width="18" height="2" rx="1" fill="currentColor"/><rect x="7" y="12" width="14" height="2" rx="1" fill="currentColor"/><rect x="3" y="16" width="18" height="2" rx="1" fill="currentColor"/></svg>
-          </button>
-          <button
-            type="button"
-            onTouchStart={saveSelection}
-            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('insertUnorderedList'); checkActiveFormats(); try { setIsUnorderedList(Boolean(document.queryCommandState && document.queryCommandState('insertUnorderedList'))) } catch (err) {} }}
-            className={`${baseBtn} ${isUnorderedList && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
-            style={tapStyle}
-          >
-            •
-          </button>
+      const cloneWrapper = document.createElement('div')
+      cloneWrapper.style.width = `${pageWidthPx}px`
+      cloneWrapper.style.position = 'relative'
+      cloneWrapper.style.background = '#ffffff'
+      cloneWrapper.style.color = '#0f172a'
+      cloneWrapper.style.boxSizing = 'border-box'
 
-          <button
-            type="button"
-            onTouchStart={saveSelection}
-            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('insertOrderedList'); checkActiveFormats(); try { setIsOrderedList(Boolean(document.queryCommandState && document.queryCommandState('insertOrderedList'))) } catch (err) {} }}
-            className={`${baseBtn} ${isOrderedList && toolbarActive ? activeCls + ' font-bold shadow' : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
-            style={tapStyle}
-          >
-            1.
-          </button>
+      const editorClone = editorEl.cloneNode(true)
+      editorClone.style.position = 'relative'
+      editorClone.style.top = '0'
+      editorClone.style.left = '0'
+      editorClone.style.width = `${pageWidthPx}px`
+      editorClone.style.padding = `${A4_VERTICAL_MARGIN}px 80px`
+      editorClone.style.boxSizing = 'border-box'
+      editorClone.style.transform = 'none'
+      editorClone.style.fontSize = '14px' // exact base font size matching editor
+      editorClone.style.lineHeight = '1.6'
+      editorClone.style.whiteSpace = 'pre-wrap'
+      editorClone.style.background = '#ffffff'
+      editorClone.style.color = '#0f172a'
+      editorClone.style.outline = 'none'
+      editorClone.style.boxShadow = 'none'
 
-          <button type="button" onTouchStart={saveSelection} onMouseDown={(e) => { e.preventDefault(); handleInsertImage(e) }} className={baseBtn} style={tapStyle}>📷</button>
+      // Synchronize checkbox values in the clone
+      const origCheckboxes = editorEl.querySelectorAll('input[type="checkbox"]')
+      const clonedCheckboxes = editorClone.querySelectorAll('input[type="checkbox"]')
+      origCheckboxes.forEach((orig, idx) => {
+        if (clonedCheckboxes[idx]) {
+          clonedCheckboxes[idx].checked = orig.checked
+          if (orig.checked) {
+            clonedCheckboxes[idx].setAttribute('checked', 'checked')
+          } else {
+            clonedCheckboxes[idx].removeAttribute('checked')
+          }
+        }
+      })
 
-          <button type="button" onTouchStart={saveSelection} onMouseDown={(e) => { e.preventDefault(); handleInsertCheckbox(e) }} className={baseBtn} style={tapStyle}>☐</button>
+      cloneWrapper.appendChild(editorClone)
+      stagingContainer.appendChild(cloneWrapper)
+      document.body.appendChild(stagingContainer)
 
-          <button type="button" onTouchStart={saveSelection} onMouseDown={(e) => { e.preventDefault(); setAutoFit((v) => !v); requestAnimationFrame(updateToolbarState) }} className={baseBtn} style={tapStyle}>⇱</button>
-        </div>
-      </div>
-    )
-  }, [toolbarActive, isBold, isItalic, isUnderline, isOrderedList, isUnorderedList, fontSize, textAlign, isAlignLeft, isAlignCenter, isAlignRight, applyFormatCb, handleInsertCheckbox, handleInsertImage, keyboardOffset, isEditing])
+      // High-resolution canvas capture at 2x scale
+      const canvas = await html2canvas(cloneWrapper, {
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        backgroundColor: '#ffffff',
+        width: pageWidthPx,
+        windowWidth: pageWidthPx,
+        logging: false,
+      })
+
+      if (document.body.contains(stagingContainer)) {
+        document.body.removeChild(stagingContainer)
+      }
+
+      // Initialize jsPDF with matching paper size and orientation
+      const pdf = new jsPDF({
+        orientation: isLandscape ? 'landscape' : 'portrait',
+        unit: 'pt',
+        format: paperType.toLowerCase(),
+      })
+
+      const pdfWidthPt = pdf.internal.pageSize.getWidth()
+      const pdfHeightPt = pdf.internal.pageSize.getHeight()
+
+      const scale = 2
+      const pageHeightCanvasPx = pageHeightPx * scale
+      const pageGapCanvasPx = pageGapPx * scale
+      const totalCanvasHeight = canvas.height
+
+      // Render each page slice into the PDF
+      // A 1-page document produces strictly 1 page in the PDF without ghost pages
+      for (let i = 0; i < currentPages; i++) {
+        if (i > 0) {
+          pdf.addPage()
+        }
+
+        const pageCanvas = document.createElement('canvas')
+        pageCanvas.width = canvas.width
+        pageCanvas.height = pageHeightCanvasPx
+        const pageCtx = pageCanvas.getContext('2d')
+
+        pageCtx.fillStyle = '#ffffff'
+        pageCtx.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
+
+        const sourceY = i * (pageHeightCanvasPx + pageGapCanvasPx)
+        const remainingHeight = Math.max(0, totalCanvasHeight - sourceY)
+        const sliceHeight = Math.min(pageHeightCanvasPx, remainingHeight)
+
+        if (sliceHeight > 0) {
+          pageCtx.drawImage(
+            canvas,
+            0,
+            sourceY,
+            canvas.width,
+            sliceHeight,
+            0,
+            0,
+            canvas.width,
+            sliceHeight
+          )
+        }
+
+        const imgData = pageCanvas.toDataURL('image/jpeg', 0.98)
+        pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidthPt, pdfHeightPt, undefined, 'FAST')
+      }
+
+      // Requirement 4: Automatic Direct PDF Download straight to user's device Downloads/Files folder
+      // without opening a new browser tab or preview page
+      const filename = 'madeEASY.pdf'
+      const pdfBlob = pdf.output('blob')
+      const blobUrl = URL.createObjectURL(pdfBlob)
+
+      const downloadAnchor = document.createElement('a')
+      downloadAnchor.href = blobUrl
+      downloadAnchor.download = filename
+      downloadAnchor.style.display = 'none'
+      document.body.appendChild(downloadAnchor)
+      downloadAnchor.click()
+
+      setTimeout(() => {
+        if (document.body.contains(downloadAnchor)) {
+          document.body.removeChild(downloadAnchor)
+        }
+        URL.revokeObjectURL(blobUrl)
+      }, 2000)
+    } catch (err) {
+      console.error('PDF Export failed:', err)
+    } finally {
+      setIsExporting(false)
+    }
+  }
 
   function focusTopMenuItem(index) {
     const itemCount = TOP_MENU_ITEMS.length
@@ -989,13 +1025,23 @@ export default function App() {
     }
   }
 
+  const baseBtn = 'toolbar-btn px-1.5 py-0.5 rounded text-xs bg-slate-800 text-slate-100 focus:outline-none transition-colors'
+  const activeCls = 'bg-indigo-600 text-white font-bold shadow'
+  const tapStyle = { WebkitTapHighlightColor: 'transparent' }
+
   return (
-    <div className="min-h-screen bg-slate-900 text-slate-100 flex flex-col">
+    <div
+      className="app-shell text-slate-100"
+      style={{
+        height: viewportStyle.height,
+        top: viewportStyle.top,
+      }}
+    >
       {/* Header */}
-      <header className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="relative" ref={topMenuRef}>
-              <button
+      <header className="px-4 py-3 border-b border-slate-800 flex items-center justify-between flex-shrink-0 bg-slate-900/90 backdrop-blur-md z-30">
+        <div className="flex items-center gap-3">
+          <div className="relative" ref={topMenuRef}>
+            <button
               ref={menuButtonRef}
               onClick={() => setShowTopMenu((s) => !s)}
               onKeyDown={handleMenuButtonKeyDown}
@@ -1020,7 +1066,7 @@ export default function App() {
             {showTopMenu && (
               <div
                 id="top-navigation-menu"
-                className="top-nav-menu absolute left-0 mt-2 w-44 rounded bg-slate-800 border border-slate-700 p-2 z-50"
+                className="top-nav-menu absolute left-0 mt-2 w-44 rounded bg-slate-800 border border-slate-700 p-2 z-50 shadow-xl"
                 role="menu"
                 aria-label="Main navigation"
                 onKeyDown={handleTopMenuKeyDown}
@@ -1033,7 +1079,7 @@ export default function App() {
                     role="menuitem"
                     aria-current={activeTab === item.id ? 'page' : undefined}
                     onClick={() => selectTopMenuItem(item.id)}
-                    className={`w-full text-left px-2 py-1 rounded ${activeTab === item.id ? 'bg-slate-700 text-white' : 'hover:bg-slate-700'}`}
+                    className={`w-full text-left px-2 py-1 rounded transition-colors ${activeTab === item.id ? 'bg-slate-700 text-white' : 'hover:bg-slate-700'}`}
                   >
                     {item.label}
                   </button>
@@ -1041,72 +1087,78 @@ export default function App() {
               </div>
             )}
           </div>
-          <h1 className="text-lg font-semibold">madeEASY.pdf</h1>
+          <h1 className="text-lg font-semibold tracking-tight">madeEASY.pdf</h1>
         </div>
 
         <div className="flex items-center gap-2">
           <button
-            onClick={async () => {
-              const el = document.querySelector('article')
-              try {
-                const mod = await import('html2pdf.js')
-                const html2pdf = mod.default || mod
-                html2pdf().from(el).save()
-              } catch (e) {
-                // fallback
-                console.warn('html2pdf not available, falling back to print', e)
-                window.print()
-              }
-            }}
-            className="bg-slate-700 text-slate-100 text-xs px-3 py-1 rounded"
+            onClick={handleExportPdf}
+            disabled={isExporting}
+            className="bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-medium text-xs px-3.5 py-1.5 rounded transition-colors flex items-center gap-1.5 shadow-sm"
             aria-label="Export PDF"
           >
-            Export
+            {isExporting ? (
+              <>
+                <svg className="animate-spin h-3.5 w-3.5 text-white" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+                </svg>
+                <span>Exporting...</span>
+              </>
+            ) : (
+              <>
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                  <polyline points="7 10 12 15 17 10"></polyline>
+                  <line x1="12" y1="15" x2="12" y2="3"></line>
+                </svg>
+                <span>Export</span>
+              </>
+            )}
           </button>
         </div>
       </header>
 
-      {/* Ultra-compact single-line top meta strip */}
-      {!(isEditing || keyboardOffset > 0) && (
-        <div className="px-3 py-2 border-b border-slate-800 flex items-center gap-2">
-        {/* hidden file input for image uploads triggered from toolbar */}
-        <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageUpload} style={{ display: 'none' }} />
-        <div>
-          <select
-            value={paperType}
-            onChange={(e) => setPaperType(e.target.value)}
-            className="bg-slate-800 text-slate-100 rounded text-xs py-0.5 px-2"
-            aria-label="Paper size"
-          >
-            {Object.keys(PAPER_SIZES).map((k) => (
-              <option key={k} value={k} className="bg-slate-900 text-xs">
-                {k}
-              </option>
-            ))}
-          </select>
-        </div>
+      {/* Top meta strip (hidden when keyboard is open on small screens to preserve screen estate) */}
+      {!isKeyboardOpen && (
+        <div className="px-3 py-1.5 border-b border-slate-800 flex items-center gap-2 flex-shrink-0 bg-slate-900/60 text-xs">
+          <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageUpload} style={{ display: 'none' }} />
+          <div>
+            <select
+              value={paperType}
+              onChange={(e) => setPaperType(e.target.value)}
+              className="bg-slate-800 text-slate-100 rounded text-xs py-0.5 px-2 border border-slate-700"
+              aria-label="Paper size"
+            >
+              {Object.keys(PAPER_SIZES).map((k) => (
+                <option key={k} value={k} className="bg-slate-900 text-xs">
+                  {k}
+                </option>
+              ))}
+            </select>
+          </div>
 
-        <div>
-          <button
-            onClick={() => setOrientation((o) => (o === 'portrait' ? 'landscape' : 'portrait'))}
-            className="bg-slate-800 text-slate-100 rounded text-xs py-0.5 px-2"
-            aria-pressed={orientation === 'landscape'}
-          >
-            {orientation.toUpperCase()}
-          </button>
-        </div>
+          <div>
+            <button
+              onClick={() => setOrientation((o) => (o === 'portrait' ? 'landscape' : 'portrait'))}
+              className="bg-slate-800 text-slate-100 rounded text-xs py-0.5 px-2 border border-slate-700"
+              aria-pressed={orientation === 'landscape'}
+            >
+              {orientation.toUpperCase()}
+            </button>
+          </div>
 
-        <div className="text-[11px] text-slate-400 px-1 py-0.5 rounded bg-slate-900/60">{dims.width} × {dims.height} mm</div>
+          <div className="text-[11px] text-slate-400 px-1 py-0.5 rounded bg-slate-900/60">{dims.width} × {dims.height} mm</div>
 
-        <div className="ml-auto flex items-center gap-1">
-          <button onClick={zoomOut} className="bg-slate-800 text-slate-100 rounded text-xs py-0.5 px-2">−</button>
-          <div className="text-xs text-slate-200 px-2">{Math.round(zoom * 100)}%</div>
-          <button onClick={zoomIn} className="bg-slate-800 text-slate-100 rounded text-xs py-0.5 px-2">+</button>
-        </div>
+          <div className="ml-auto flex items-center gap-1">
+            <button onClick={zoomOut} className="bg-slate-800 text-slate-100 rounded text-xs py-0.5 px-2 border border-slate-700">−</button>
+            <div className="text-xs text-slate-200 px-1.5">{Math.round(zoom * 100)}%</div>
+            <button onClick={zoomIn} className="bg-slate-800 text-slate-100 rounded text-xs py-0.5 px-2 border border-slate-700">+</button>
+          </div>
         </div>
       )}
 
-      {/* Main content area */}
+      {/* Main content area - Only this container scrolls, body is locked (Requirement 5) */}
       <main className="editor-workspace flex-1">
         <div
           ref={viewportRef}
@@ -1134,7 +1186,7 @@ export default function App() {
               left: 0,
               width: A4_PAGE_WIDTH,
               minHeight: A4_PAGE_HEIGHT,
-              padding: '72px 80px',
+              padding: `${A4_VERTICAL_MARGIN}px 80px`,
               boxSizing: 'border-box',
               outline: 'none',
               background: 'transparent',
@@ -1176,9 +1228,166 @@ export default function App() {
         </div>
       </main>
 
-      {/* Floating Formatting Toolbar (elevated above bottom nav) */}
-      {toolbarMemo}
+      {/* Requirement 2 & 5: Single-row, edge-to-edge dock attached directly to top edge of soft keyboard / screen bottom */}
+      <footer className="toolbar-dock toolbar">
+        <div className="toolbar-scroll-row">
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('bold'); checkActiveFormats() }}
+            className={`${baseBtn} ${isBold && toolbarActive ? activeCls : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
+            aria-pressed={isBold}
+            style={tapStyle}
+            title="Bold"
+          >
+            <b>B</b>
+          </button>
 
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('italic'); checkActiveFormats() }}
+            className={`${baseBtn} ${isItalic && toolbarActive ? activeCls : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
+            aria-pressed={isItalic}
+            style={tapStyle}
+            title="Italic"
+          >
+            <i>I</i>
+          </button>
+
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('underline'); checkActiveFormats() }}
+            className={`${baseBtn} ${isUnderline && toolbarActive ? activeCls : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
+            aria-pressed={isUnderline}
+            style={tapStyle}
+            title="Underline"
+          >
+            <u>U</u>
+          </button>
+
+          <select
+            value={fontSize}
+            onChange={(e) => { setFontSize(e.target.value); applyFontSizeToSelection(e.target.value) }}
+            className="toolbar-select bg-slate-700 text-white text-xs border border-slate-600 rounded px-1.5 py-0.5 focus:outline-none"
+            onTouchStart={saveSelection}
+            onMouseDown={saveSelection}
+            onFocus={saveSelection}
+            title="Font Size"
+          >
+            {['12px','14px','16px','18px','20px','24px','32px'].map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('justifyLeft'); checkActiveFormats() }}
+            className={`${baseBtn} ${isAlignLeft && toolbarActive ? activeCls : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
+            aria-pressed={isAlignLeft}
+            title="Align left"
+            style={tapStyle}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="3" y="4" width="14" height="2" rx="1" fill="currentColor"/>
+              <rect x="3" y="8" width="18" height="2" rx="1" fill="currentColor"/>
+              <rect x="3" y="12" width="14" height="2" rx="1" fill="currentColor"/>
+              <rect x="3" y="16" width="18" height="2" rx="1" fill="currentColor"/>
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('justifyCenter'); checkActiveFormats() }}
+            className={`${baseBtn} ${isAlignCenter && toolbarActive ? activeCls : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
+            aria-pressed={isAlignCenter}
+            title="Align center"
+            style={tapStyle}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="5" y="4" width="14" height="2" rx="1" fill="currentColor"/>
+              <rect x="3" y="8" width="18" height="2" rx="1" fill="currentColor"/>
+              <rect x="5" y="12" width="14" height="2" rx="1" fill="currentColor"/>
+              <rect x="3" y="16" width="18" height="2" rx="1" fill="currentColor"/>
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('justifyRight'); checkActiveFormats() }}
+            className={`${baseBtn} ${isAlignRight && toolbarActive ? activeCls : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
+            aria-pressed={isAlignRight}
+            title="Align right"
+            style={tapStyle}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <rect x="7" y="4" width="14" height="2" rx="1" fill="currentColor"/>
+              <rect x="3" y="8" width="18" height="2" rx="1" fill="currentColor"/>
+              <rect x="7" y="12" width="14" height="2" rx="1" fill="currentColor"/>
+              <rect x="3" y="16" width="18" height="2" rx="1" fill="currentColor"/>
+            </svg>
+          </button>
+
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('insertUnorderedList'); checkActiveFormats() }}
+            className={`${baseBtn} ${isUnorderedList && toolbarActive ? activeCls : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
+            style={tapStyle}
+            title="Bullet List"
+          >
+            •
+          </button>
+
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); applyFormatCb('insertOrderedList'); checkActiveFormats() }}
+            className={`${baseBtn} ${isOrderedList && toolbarActive ? activeCls : 'bg-transparent text-slate-300 hover:bg-slate-700/50'}`}
+            style={tapStyle}
+            title="Numbered List"
+          >
+            1.
+          </button>
+
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); handleInsertImage(e) }}
+            className={baseBtn}
+            style={tapStyle}
+            title="Insert Image"
+          >
+            📷
+          </button>
+
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); handleInsertCheckbox(e) }}
+            className={baseBtn}
+            style={tapStyle}
+            title="Insert Checkbox"
+          >
+            ☐
+          </button>
+
+          <button
+            type="button"
+            onTouchStart={saveSelection}
+            onMouseDown={(e) => { e.preventDefault(); setAutoFit((v) => !v); requestAnimationFrame(updateToolbarState) }}
+            className={baseBtn}
+            style={tapStyle}
+            title="Auto Fit"
+          >
+            ⇱
+          </button>
+        </div>
+      </footer>
     </div>
   )
 }

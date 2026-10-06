@@ -8,10 +8,10 @@ const PAPER_SIZES = {
 
 const A4_PAGE_WIDTH = 794
 const A4_PAGE_HEIGHT = 1123
-const A4_VERTICAL_MARGIN = 72
-const A4_PRINTABLE_HEIGHT = A4_PAGE_HEIGHT - A4_VERTICAL_MARGIN * 2
-const A4_PAGE_GAP = 24
-const A4_PAGE_DEAD_ZONE = A4_VERTICAL_MARGIN * 2 + A4_PAGE_GAP
+const A4_MARGIN = 72 // Strict 1-inch (72px) margin on all 4 sides (top, bottom, left, right)
+const A4_PRINTABLE_HEIGHT = A4_PAGE_HEIGHT - A4_MARGIN * 2 // 979px
+const A4_PAGE_GAP = 24 // Gap between page sheets
+const A4_PAGE_DEAD_ZONE = A4_MARGIN * 2 + A4_PAGE_GAP // 168px (72 bottom + 24 gap + 72 top)
 
 const TOP_MENU_ITEMS = [
   { id: 'editor', label: 'Editor' },
@@ -30,6 +30,7 @@ export default function App() {
   const [pageCount, setPageCount] = useState(1)
   const [isSelecting, setIsSelecting] = useState(false)
   const [isExporting, setIsExporting] = useState(false)
+  const [exportModal, setExportModal] = useState(null)
 
   // Track soft keyboard size and visual viewport so toolbar docks directly to keyboard
   const [viewportStyle, setViewportStyle] = useState(() => ({
@@ -53,8 +54,9 @@ export default function App() {
 
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v))
 
+  // Exact 1-inch printable boundaries per page
   function getPageContentStart(pageIndex) {
-    return A4_VERTICAL_MARGIN + pageIndex * (A4_PRINTABLE_HEIGHT + A4_PAGE_DEAD_ZONE)
+    return A4_MARGIN + pageIndex * (A4_PAGE_HEIGHT + A4_PAGE_GAP)
   }
 
   function getPageContentEnd(pageIndex) {
@@ -62,8 +64,8 @@ export default function App() {
   }
 
   // Strict page count determination:
-  // Documents that fit on one page should stay strictly on 1 page!
-  // A second page is only created when content actually overflows past the bottom margin of Page 1.
+  // Documents that fit on one page stay strictly on 1 page.
+  // A second page is only created when content actually overflows past the 1-inch bottom margin of Page 1.
   function updatePageCount(element = editorRef.current, minimumPageCount = 1) {
     if (!element) return
 
@@ -84,17 +86,14 @@ export default function App() {
       }
     }
 
-    // Page 1 printable area ends at getPageContentEnd(0) (1051px).
-    // Allow a small 4px subpixel/line-height buffer so minor rendering differences do not cause false overflows.
     const page1End = getPageContentEnd(0)
-    if (maxContentBottom <= page1End + 4 && minimumPageCount <= 1) {
+    if (maxContentBottom <= page1End && minimumPageCount <= 1) {
       setPageCount((curr) => (curr === 1 ? curr : 1))
       return
     }
 
-    // If content extends beyond Page 1, calculate the required number of pages
     let requiredPages = 1
-    while (maxContentBottom > getPageContentEnd(requiredPages - 1) + 4) {
+    while (maxContentBottom > getPageContentEnd(requiredPages - 1)) {
       requiredPages++
     }
 
@@ -105,32 +104,48 @@ export default function App() {
   function getPageLayoutSignature(element) {
     return Array.from(element.children)
       .filter((child) => !child.hasAttribute('data-virtual-page-break'))
-      .map((child) => `${child.tagName}:${child.offsetHeight}:${child.textContent?.length || 0}`)
+      .map((child) => `${child.tagName}:${child.offsetTop}:${child.offsetHeight}:${child.textContent?.length || 0}`)
       .join('|')
   }
 
   function insertVirtualPageBreak(block, nextPageIndex) {
     const spacer = document.createElement('div')
     spacer.setAttribute('data-virtual-page-break', 'true')
-    spacer.setAttribute('data-page-dead-zone', `${A4_PAGE_DEAD_ZONE}`)
     spacer.setAttribute('contenteditable', 'false')
     spacer.setAttribute('aria-hidden', 'true')
-    spacer.style.height = `${Math.max(0, getPageContentStart(nextPageIndex) - block.offsetTop)}px`
+
+    const targetTop = getPageContentStart(nextPageIndex)
+    const currentTop = block.offsetTop
+    const spacerHeight = Math.max(0, targetTop - currentTop)
+
+    spacer.style.height = `${spacerHeight}px`
+    spacer.style.width = '100%'
+    spacer.style.display = 'block'
+    spacer.style.margin = '0'
+    spacer.style.padding = '0'
     spacer.style.pointerEvents = 'none'
+    spacer.style.userSelect = 'none'
+    spacer.style.background = 'transparent'
+
     block.before(spacer)
   }
 
+  // Clean Page Jump & No Gap Bleed (Requirement 1):
+  // When content reaches the 1-inch bottom margin of Page 1, it stops and jumps cleanly
+  // over the 24px dark gap to begin exactly 1 inch (72px) below the top edge of Page 2.
+  // No text or code line ever sits inside the dark gap between pages.
   function paginateDocument(element = editorRef.current) {
     if (!element) return
 
     Array.from(element.querySelectorAll(':scope > [data-virtual-page-break]')).forEach((spacer) => spacer.remove())
+    void element.offsetHeight
 
     let pageIndex = 0
-    const blocks = Array.from(element.children)
+    const blocks = Array.from(element.children).filter((child) => !child.hasAttribute('data-virtual-page-break'))
 
     blocks.forEach((block) => {
       const blockHeight = block.offsetHeight
-      if (blockHeight === 0 || blockHeight > A4_PRINTABLE_HEIGHT) return
+      if (blockHeight === 0) return
 
       while (block.offsetTop >= getPageContentEnd(pageIndex)) {
         const nextPageIndex = pageIndex + 1
@@ -140,7 +155,7 @@ export default function App() {
         pageIndex = nextPageIndex
       }
 
-      if (block.offsetTop + blockHeight > getPageContentEnd(pageIndex) + 4) {
+      if (block.offsetTop + blockHeight > getPageContentEnd(pageIndex)) {
         const nextPageIndex = pageIndex + 1
         insertVirtualPageBreak(block, nextPageIndex)
         pageIndex = nextPageIndex
@@ -172,26 +187,20 @@ export default function App() {
     scheduleDocumentPagination(e.currentTarget)
   }
 
-  // Toolbar controls take focus on mobile. Keep the editor's range so a format
-  // action still applies to the text the user selected before touching the dock.
   function saveSelection() {
     try {
       const selection = window.getSelection()
       if (!selection || selection.rangeCount === 0) return
-
       const range = selection.getRangeAt(0)
       if (!editorRef.current?.contains(range.commonAncestorContainer)) return
       savedRangeRef.current = range.cloneRange()
-    } catch (e) {
-      // A browser can discard the range while a touch interaction is ending.
-    }
+    } catch (e) {}
   }
 
   function restoreSelection() {
     try {
       const range = savedRangeRef.current
       if (!range || !editorRef.current?.contains(range.commonAncestorContainer)) return false
-
       const selection = window.getSelection()
       if (!selection) return false
       selection.removeAllRanges()
@@ -217,10 +226,10 @@ export default function App() {
   }
 
   function zoomIn() {
-    setZoom((z) => clamp(Math.round((z + 0.1) * 100) / 100, 0.5, 2.0))
+    setZoom((z) => clamp(Math.round((z + 0.1) * 100) / 100, 0.5, 2.5))
   }
   function zoomOut() {
-    setZoom((z) => clamp(Math.round((z - 0.1) * 100) / 100, 0.5, 2.0))
+    setZoom((z) => clamp(Math.round((z - 0.1) * 100) / 100, 0.5, 2.5))
   }
 
   function getDistance(touches) {
@@ -230,18 +239,21 @@ export default function App() {
     return Math.sqrt(dx * dx + dy * dy)
   }
 
-  function isInEditorOrToolbar(target) {
+  function isInToolbar(target) {
     try {
       if (!target) return false
       const el = target.nodeType === 3 ? target.parentElement : target
-      if (!el || !el.closest) return false
-      return Boolean(el.closest('[contenteditable="true"]') || el.closest('.toolbar'))
+      return Boolean(el && el.closest && el.closest('.toolbar'))
     } catch (e) {
       return false
     }
   }
 
+  // Requirement 2: Paper-Only Canvas Zooming (Lock Website Viewport Zooming)
+  // Pinch gestures scale ONLY the document paper canvas, while the UI shell remains locked at 100%
   function handleTouchStart(e) {
+    if (isInToolbar(e.target)) return
+
     try {
       const t = e.target.nodeType === 3 ? e.target.parentElement : e.target
       const img = t && t.closest ? t.closest('img') : null
@@ -256,13 +268,12 @@ export default function App() {
       }
     } catch (err) {}
 
-    if (isInEditorOrToolbar(e.target)) return
-
     if (e.touches && e.touches.length === 2) {
       pinchRef.current.pinching = true
       pinchRef.current.initialDistance = getDistance(e.touches)
       pinchRef.current.initialZoom = zoom
       setIsSelecting(false)
+      e.preventDefault()
       return
     }
     if (e.touches && e.touches.length === 1) {
@@ -275,7 +286,7 @@ export default function App() {
       if (imagePinchRef.current.active && e.touches && e.touches.length === 2) {
         const distance = getDistance(e.touches)
         const ratio = distance / imagePinchRef.current.initialDistance
-        const newWidth = Math.max(24, Math.min(imagePinchRef.current.initialWidth * ratio, (editorRef.current?.getBoundingClientRect().width || 1000)))
+        const newWidth = Math.max(24, Math.min(imagePinchRef.current.initialWidth * ratio, 1000))
         if (imagePinchRef.current.img) {
           imagePinchRef.current.img.style.width = `${newWidth}px`
           imagePinchRef.current.img.style.height = 'auto'
@@ -286,12 +297,10 @@ export default function App() {
     } catch (err) {}
 
     if (pinchRef.current.pinching && e.touches && e.touches.length === 2) {
-      if (!isInEditorOrToolbar(e.target)) {
-        e.preventDefault()
-      }
+      e.preventDefault()
       const distance = getDistance(e.touches)
       const ratio = distance / pinchRef.current.initialDistance
-      const next = clamp(pinchRef.current.initialZoom * ratio, 0.5, 2.0)
+      const next = clamp(Math.round(pinchRef.current.initialZoom * ratio * 100) / 100, 0.5, 2.5)
       setZoom(next)
     }
   }
@@ -311,6 +320,20 @@ export default function App() {
       setTimeout(() => setIsSelecting(false), 50)
     }
   }
+
+  // Prevent browser viewport pinch zoom on iOS Safari so main web UI never stretches
+  useEffect(() => {
+    const preventGesture = (e) => e.preventDefault()
+    document.addEventListener('gesturestart', preventGesture, { passive: false })
+    document.addEventListener('gesturechange', preventGesture, { passive: false })
+    document.addEventListener('gestureend', preventGesture, { passive: false })
+
+    return () => {
+      document.removeEventListener('gesturestart', preventGesture)
+      document.removeEventListener('gesturechange', preventGesture)
+      document.removeEventListener('gestureend', preventGesture)
+    }
+  }, [])
 
   // Visual viewport tracking: locks outer viewport and docks toolbar directly to keyboard top edge
   useEffect(() => {
@@ -434,61 +457,6 @@ export default function App() {
   const [isAlignCenter, setIsAlignCenter] = useState(false)
   const [isAlignRight, setIsAlignRight] = useState(false)
   const rafRef = useRef(null)
-
-  // Runtime error overlay
-  useEffect(() => {
-    const showError = (msg) => {
-      try {
-        let el = document.getElementById('runtime-error')
-        if (!el) {
-          el = document.createElement('div')
-          el.id = 'runtime-error'
-          Object.assign(el.style, {
-            position: 'fixed',
-            left: '8px',
-            right: '8px',
-            top: '8px',
-            background: '#7f1d1d',
-            color: 'white',
-            padding: '12px',
-            zIndex: 2147483647,
-            borderRadius: '6px',
-            fontSize: '13px',
-            maxHeight: '40vh',
-            overflow: 'auto',
-            boxShadow: '0 8px 24px rgba(0,0,0,0.6)',
-          })
-          document.body.appendChild(el)
-        }
-        el.textContent = msg
-      } catch (err) {}
-    }
-
-    const onErr = (e) => {
-      try {
-        const msg = e && (e.error && e.error.stack ? e.error.stack : e.message || String(e))
-        console.error(e)
-        showError('Runtime Error:\n' + msg)
-      } catch (err) {}
-    }
-
-    const onRej = (e) => {
-      try {
-        const r = e && e.reason ? (e.reason.stack || e.reason.message || String(e.reason)) : String(e)
-        console.error('UnhandledRejection', e)
-        showError('Unhandled Rejection:\n' + r)
-      } catch (err) {}
-    }
-
-    window.addEventListener('error', onErr)
-    window.addEventListener('unhandledrejection', onRej)
-    return () => {
-      window.removeEventListener('error', onErr)
-      window.removeEventListener('unhandledrejection', onRej)
-      const el = document.getElementById('runtime-error')
-      if (el) el.remove()
-    }
-  }, [])
 
   function checkActiveFormats() {
     try {
@@ -801,14 +769,29 @@ export default function App() {
     }
   }, [])
 
-  // Robust 1:1 PDF Generation with Direct Automatic Download (Requirements 1, 3, 4)
+  function triggerDirectDownload(blobUrl, filename = 'madeEASY.pdf') {
+    const downloadAnchor = document.createElement('a')
+    downloadAnchor.href = blobUrl
+    downloadAnchor.download = filename
+    downloadAnchor.style.display = 'none'
+    document.body.appendChild(downloadAnchor)
+    downloadAnchor.click()
+    setTimeout(() => {
+      if (document.body.contains(downloadAnchor)) {
+        document.body.removeChild(downloadAnchor)
+      }
+    }, 2000)
+  }
+
+  // Requirement 1 & 3: Multi-Page Flow with 1-Inch Margins & Native Mobile Web Share Integration
   async function handleExportPdf() {
     if (isExporting) return
     setIsExporting(true)
 
     try {
       const editorEl = editorRef.current
-      if (!editorEl) return
+      const articleEl = document.querySelector('article.a4-document')
+      if (!editorEl || !articleEl) return
 
       const { jsPDF } = await import('jspdf')
       const html2canvasMod = await import('html2canvas')
@@ -819,7 +802,6 @@ export default function App() {
       const paperWidthMm = isLandscape ? baseDim.h : baseDim.w
       const paperHeightMm = isLandscape ? baseDim.w : baseDim.h
 
-      // Target 96 DPI pixel dimensions matching editor canvas
       const pageWidthPx = Math.round((paperWidthMm * 96) / 25.4)
       const pageHeightPx = Math.round((paperHeightMm * 96) / 25.4)
       const pageGapPx = A4_PAGE_GAP
@@ -827,8 +809,9 @@ export default function App() {
       // Refresh pagination to verify exact page count
       paginateDocument(editorEl)
       const currentPages = pageCount
+      const totalDocHeight = currentPages * pageHeightPx + Math.max(0, currentPages - 1) * pageGapPx
 
-      // Create unscaled 1:1 staging clone off-screen
+      // Create unscaled 1:1 staging clone off-screen matching exact sheet layout
       const stagingContainer = document.createElement('div')
       stagingContainer.className = 'pdf-export-hidden'
       stagingContainer.style.position = 'fixed'
@@ -836,34 +819,36 @@ export default function App() {
       stagingContainer.style.top = '0'
       stagingContainer.style.width = `${pageWidthPx}px`
       stagingContainer.style.zIndex = '-9999'
-      stagingContainer.style.background = '#ffffff'
+      stagingContainer.style.background = '#12161f'
 
-      const cloneWrapper = document.createElement('div')
-      cloneWrapper.style.width = `${pageWidthPx}px`
-      cloneWrapper.style.position = 'relative'
-      cloneWrapper.style.background = '#ffffff'
-      cloneWrapper.style.color = '#0f172a'
-      cloneWrapper.style.boxSizing = 'border-box'
+      const articleClone = articleEl.cloneNode(true)
+      articleClone.style.transform = 'none'
+      articleClone.style.transformOrigin = 'top left'
+      articleClone.style.margin = '0'
+      articleClone.style.position = 'relative'
+      articleClone.style.width = `${pageWidthPx}px`
+      articleClone.style.height = `${totalDocHeight}px`
 
-      const editorClone = editorEl.cloneNode(true)
-      editorClone.style.position = 'relative'
-      editorClone.style.top = '0'
-      editorClone.style.left = '0'
-      editorClone.style.width = `${pageWidthPx}px`
-      editorClone.style.padding = `${A4_VERTICAL_MARGIN}px 80px`
-      editorClone.style.boxSizing = 'border-box'
-      editorClone.style.transform = 'none'
-      editorClone.style.fontSize = '14px' // exact base font size matching editor
-      editorClone.style.lineHeight = '1.6'
-      editorClone.style.whiteSpace = 'pre-wrap'
-      editorClone.style.background = '#ffffff'
-      editorClone.style.color = '#0f172a'
-      editorClone.style.outline = 'none'
-      editorClone.style.boxShadow = 'none'
+      // Remove drop-shadows on cloned sheets and enforce strict 1-inch (72px) padding
+      const clonedSheets = articleClone.querySelectorAll('.a4-page-sheet')
+      clonedSheets.forEach((sheet) => {
+        sheet.style.boxShadow = 'none'
+        sheet.style.width = `${pageWidthPx}px`
+        sheet.style.height = `${pageHeightPx}px`
+        sheet.style.padding = `${A4_MARGIN}px`
+        sheet.style.margin = `0 auto ${pageGapPx}px`
+      })
 
-      // Synchronize checkbox values in the clone
+      const clonedEditor = articleClone.querySelector('.document-editor')
+      if (clonedEditor) {
+        clonedEditor.style.padding = `${A4_MARGIN}px`
+        clonedEditor.style.width = `${pageWidthPx}px`
+        clonedEditor.style.fontSize = '14px'
+      }
+
+      // Sync checkbox checked states in the clone
       const origCheckboxes = editorEl.querySelectorAll('input[type="checkbox"]')
-      const clonedCheckboxes = editorClone.querySelectorAll('input[type="checkbox"]')
+      const clonedCheckboxes = articleClone.querySelectorAll('input[type="checkbox"]')
       origCheckboxes.forEach((orig, idx) => {
         if (clonedCheckboxes[idx]) {
           clonedCheckboxes[idx].checked = orig.checked
@@ -875,16 +860,15 @@ export default function App() {
         }
       })
 
-      cloneWrapper.appendChild(editorClone)
-      stagingContainer.appendChild(cloneWrapper)
+      stagingContainer.appendChild(articleClone)
       document.body.appendChild(stagingContainer)
 
       // High-resolution canvas capture at 2x scale
-      const canvas = await html2canvas(cloneWrapper, {
+      const canvas = await html2canvas(articleClone, {
         scale: 2,
         useCORS: true,
         allowTaint: true,
-        backgroundColor: '#ffffff',
+        backgroundColor: '#12161f',
         width: pageWidthPx,
         windowWidth: pageWidthPx,
         logging: false,
@@ -894,7 +878,6 @@ export default function App() {
         document.body.removeChild(stagingContainer)
       }
 
-      // Initialize jsPDF with matching paper size and orientation
       const pdf = new jsPDF({
         orientation: isLandscape ? 'landscape' : 'portrait',
         unit: 'pt',
@@ -907,10 +890,9 @@ export default function App() {
       const scale = 2
       const pageHeightCanvasPx = pageHeightPx * scale
       const pageGapCanvasPx = pageGapPx * scale
-      const totalCanvasHeight = canvas.height
 
-      // Render each page slice into the PDF
-      // A 1-page document produces strictly 1 page in the PDF without ghost pages
+      // Render each page sheet into the PDF:
+      // Slices out the 24px gap so Page 1 and Page 2 each have strict 1-inch (72px) margins on all 4 sides!
       for (let i = 0; i < currentPages; i++) {
         if (i > 0) {
           pdf.addPage()
@@ -925,46 +907,45 @@ export default function App() {
         pageCtx.fillRect(0, 0, pageCanvas.width, pageCanvas.height)
 
         const sourceY = i * (pageHeightCanvasPx + pageGapCanvasPx)
-        const remainingHeight = Math.max(0, totalCanvasHeight - sourceY)
-        const sliceHeight = Math.min(pageHeightCanvasPx, remainingHeight)
-
-        if (sliceHeight > 0) {
-          pageCtx.drawImage(
-            canvas,
-            0,
-            sourceY,
-            canvas.width,
-            sliceHeight,
-            0,
-            0,
-            canvas.width,
-            sliceHeight
-          )
-        }
+        pageCtx.drawImage(
+          canvas,
+          0,
+          sourceY,
+          canvas.width,
+          pageHeightCanvasPx,
+          0,
+          0,
+          canvas.width,
+          pageHeightCanvasPx
+        )
 
         const imgData = pageCanvas.toDataURL('image/jpeg', 0.98)
         pdf.addImage(imgData, 'JPEG', 0, 0, pdfWidthPt, pdfHeightPt, undefined, 'FAST')
       }
 
-      // Requirement 4: Automatic Direct PDF Download straight to user's device Downloads/Files folder
-      // without opening a new browser tab or preview page
-      const filename = 'madeEASY.pdf'
       const pdfBlob = pdf.output('blob')
+      const pdfFile = new File([pdfBlob], 'madeEASY.pdf', { type: 'application/pdf' })
       const blobUrl = URL.createObjectURL(pdfBlob)
 
-      const downloadAnchor = document.createElement('a')
-      downloadAnchor.href = blobUrl
-      downloadAnchor.download = filename
-      downloadAnchor.style.display = 'none'
-      document.body.appendChild(downloadAnchor)
-      downloadAnchor.click()
+      setExportModal({ blob: pdfBlob, file: pdfFile, url: blobUrl })
 
-      setTimeout(() => {
-        if (document.body.contains(downloadAnchor)) {
-          document.body.removeChild(downloadAnchor)
+      // Requirement 3: Native Mobile Download / Share Integration (navigator.share)
+      if (navigator.canShare && navigator.canShare({ files: [pdfFile] })) {
+        try {
+          await navigator.share({
+            files: [pdfFile],
+            title: 'madeEASY.pdf',
+            text: 'Exported from madeEASY.pdf',
+          })
+        } catch (shareErr) {
+          if (shareErr.name !== 'AbortError') {
+            triggerDirectDownload(blobUrl, 'madeEASY.pdf')
+          }
         }
-        URL.revokeObjectURL(blobUrl)
-      }, 2000)
+      } else {
+        // Desktop / direct download fallback without new tab
+        triggerDirectDownload(blobUrl, 'madeEASY.pdf')
+      }
     } catch (err) {
       console.error('PDF Export failed:', err)
     } finally {
@@ -1037,7 +1018,7 @@ export default function App() {
         top: viewportStyle.top,
       }}
     >
-      {/* Header */}
+      {/* Header - Fixed UI shell at 100% size (Requirement 2) */}
       <header className="px-4 py-3 border-b border-slate-800 flex items-center justify-between flex-shrink-0 bg-slate-900/90 backdrop-blur-md z-30">
         <div className="flex items-center gap-3">
           <div className="relative" ref={topMenuRef}>
@@ -1119,7 +1100,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Top meta strip (hidden when keyboard is open on small screens to preserve screen estate) */}
+      {/* Top meta strip - Fixed UI shell at 100% size */}
       {!isKeyboardOpen && (
         <div className="px-3 py-1.5 border-b border-slate-800 flex items-center gap-2 flex-shrink-0 bg-slate-900/60 text-xs">
           <input ref={fileInputRef} type="file" accept="image/*" onChange={handleImageUpload} style={{ display: 'none' }} />
@@ -1158,7 +1139,7 @@ export default function App() {
         </div>
       )}
 
-      {/* Main content area - Only this container scrolls, body is locked (Requirement 5) */}
+      {/* Main content area - Scrolling occurs only here; pinch zoom scales paper canvas only (Requirement 2) */}
       <main className="editor-workspace flex-1">
         <div
           ref={viewportRef}
@@ -1166,19 +1147,20 @@ export default function App() {
           onTouchMove={handleTouchMove}
           onTouchEnd={handleTouchEnd}
           className="a4-document-viewport"
-          style={{ touchAction: 'pan-y pinch-zoom' }}
+          style={{ touchAction: 'pan-x pan-y' }}
         >
           {(() => {
+            const effectiveScale = pageScale * zoom
             const documentHeight = pageCount * A4_PAGE_HEIGHT + Math.max(0, pageCount - 1) * A4_PAGE_GAP
             const stageStyle = {
-              width: A4_PAGE_WIDTH * pageScale,
-              height: documentHeight * pageScale,
+              width: A4_PAGE_WIDTH * effectiveScale,
+              height: documentHeight * effectiveScale,
             }
             const documentStyle = {
               width: A4_PAGE_WIDTH,
               height: documentHeight,
-              transform: `scale(${pageScale})`,
-              transformOrigin: 'top left',
+              transform: `scale(${effectiveScale})`,
+              transformOrigin: 'top center',
             }
             const editorStyle = {
               position: 'absolute',
@@ -1186,7 +1168,7 @@ export default function App() {
               left: 0,
               width: A4_PAGE_WIDTH,
               minHeight: A4_PAGE_HEIGHT,
-              padding: `${A4_VERTICAL_MARGIN}px 80px`,
+              padding: `${A4_MARGIN}px`,
               boxSizing: 'border-box',
               outline: 'none',
               background: 'transparent',
@@ -1228,7 +1210,74 @@ export default function App() {
         </div>
       </main>
 
-      {/* Requirement 2 & 5: Single-row, edge-to-edge dock attached directly to top edge of soft keyboard / screen bottom */}
+      {/* Requirement 3: Sticky Export Action Bar / Sheet for Native Mobile Share & Download */}
+      {exportModal && (
+        <div className="export-action-bar" role="alert" aria-live="polite">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <div className="h-8 w-8 rounded-lg bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center flex-shrink-0 text-indigo-400">
+              <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                <polyline points="14 2 14 8 20 8"></polyline>
+              </svg>
+            </div>
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-white truncate">madeEASY.pdf Ready</div>
+              <div className="text-[11px] text-slate-400 truncate">1-Inch Margins • 1:1 Export</div>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <button
+              type="button"
+              onClick={() => triggerDirectDownload(exportModal.url, 'madeEASY.pdf')}
+              className="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium px-3 py-1.5 rounded-lg flex items-center gap-1.5 shadow transition-colors"
+            >
+              <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              <span>Download</span>
+            </button>
+
+            {navigator.canShare && navigator.canShare({ files: [exportModal.file] }) && (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.share({
+                      files: [exportModal.file],
+                      title: 'madeEASY.pdf',
+                      text: 'Exported from madeEASY.pdf',
+                    })
+                  } catch (e) {}
+                }}
+                className="bg-slate-700 hover:bg-slate-600 text-white text-xs font-medium px-3 py-1.5 rounded-lg flex items-center gap-1.5 transition-colors"
+              >
+                <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="18" cy="5" r="3"></circle>
+                  <circle cx="6" cy="12" r="3"></circle>
+                  <circle cx="18" cy="19" r="3"></circle>
+                  <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+                  <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+                </svg>
+                <span>Share</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setExportModal(null)}
+              className="text-slate-400 hover:text-white p-1 rounded-lg hover:bg-slate-800 transition-colors"
+              aria-label="Close action bar"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Formatting toolbar - Fixed UI shell at bottom of screen / keyboard */}
       <footer className="toolbar-dock toolbar">
         <div className="toolbar-scroll-row">
           <button
